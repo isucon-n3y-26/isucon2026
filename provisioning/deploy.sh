@@ -40,13 +40,24 @@ for NAME in "${TARGET_NAMES[@]}"; do
   echo "==> Deploying to $NAME ($HOST) ..."
   echo "========================================="
 
+  # ローカルの最新状態をサーバーへ差分rsync
+  echo "--> rsync repo ..."
+  rsync -az \
+    --exclude='webapp/nodejs/node_modules/' \
+    --exclude='webapp/ruby/vendor/' \
+    --exclude='webapp/python/__pycache__/' \
+    --exclude='webapp/php/vendor/' \
+    --exclude='webapp/perl/local/' \
+    --exclude='webapp/rust/target/' \
+    --exclude='webapp/rust/isureal' \
+    --exclude='webapp/go/isureal' \
+    --exclude='webapp/ruby/.bundle/' \
+    -e "ssh $SSH_OPTS" \
+    "$SCRIPT_DIR/../" \
+    "$HOST:$REMOTE_REPO_DIR/"
+
   ssh $SSH_OPTS "$HOST" "
     set -eu
-
-    # 1. git pull
-    echo '--> git pull ...'
-    cd '$REMOTE_REPO_DIR'
-    git pull
 
     # 2. webapp/ を rsync で反映
     echo '--> rsync webapp/ ...'
@@ -59,7 +70,7 @@ for NAME in "${TARGET_NAMES[@]}"; do
     # 3. Go ビルド
     echo '--> Building Go app ...'
     cd '$REMOTE_WEBAPP_DIR/go'
-    go build -o isureal cmd/isureal/main.go
+    /home/isucon/local/go/bin/go build -o isureal cmd/isureal/main.go
 
     # 4. サービス再起動
     echo '--> Restarting isureal-go.service ...'

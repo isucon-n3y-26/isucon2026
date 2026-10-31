@@ -1,12 +1,12 @@
 #!/bin/bash
 # setup_server.sh
-# 【初回のみ】各Appサーバーに GitHub リポジトリを clone する
+# 【初回のみ】ローカルのリポジトリを各Appサーバーへ rsync して初期配置する
 # 使い方: bash provisioning/setup_server.sh
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-REPO_URL="https://github.com/isucon-n3y-26/isucon2026.git"
 REMOTE_REPO_DIR="/home/isucon/isucon2026"
 
 APP_HOSTS=(
@@ -23,15 +23,20 @@ for HOST in "${APP_HOSTS[@]}"; do
   echo "==> Setup $HOST ..."
   echo "========================================="
 
-  ssh $SSH_OPTS "$HOST" "
-    set -eu
-    if [ -d '$REMOTE_REPO_DIR/.git' ]; then
-      echo 'Repo already exists, skipping clone.'
-    else
-      git clone '$REPO_URL' '$REMOTE_REPO_DIR'
-      echo 'Clone done.'
-    fi
-  "
+  # ローカルのリポジトリを丸ごとrsync (.git も含めて転送)
+  rsync -avz --progress \
+    --exclude='webapp/nodejs/node_modules/' \
+    --exclude='webapp/ruby/vendor/' \
+    --exclude='webapp/python/__pycache__/' \
+    --exclude='webapp/php/vendor/' \
+    --exclude='webapp/perl/local/' \
+    --exclude='webapp/rust/target/' \
+    --exclude='webapp/rust/isureal' \
+    --exclude='webapp/go/isureal' \
+    --exclude='webapp/ruby/.bundle/' \
+    -e "ssh $SSH_OPTS" \
+    "$REPO_DIR/" \
+    "$HOST:$REMOTE_REPO_DIR/"
 
   echo "--> Done: $HOST"
 done
