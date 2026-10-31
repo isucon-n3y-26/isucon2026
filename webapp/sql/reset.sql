@@ -45,6 +45,8 @@ SELECT id, user_low_id, user_high_id, source_request_id, created_at, updated_at 
 CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id);
 INSERT INTO follows (id, follower_id, followee_id, created_at, updated_at)
 SELECT id, follower_id, followee_id, created_at, updated_at FROM initial_follows;
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE INDEX IF NOT EXISTS follows_followee_id ON follows(followee_id);
 INSERT INTO block_relations (id, blocker_id, blocked_id, created_at)
 SELECT id, blocker_id, blocked_id, created_at FROM initial_block_relations;
 -- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
