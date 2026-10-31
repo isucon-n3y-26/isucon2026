@@ -43,12 +43,13 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		ctx := c.Request().Context()
 		// 署名の鍵と削除状態を1往復で取得する。削除状態は毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
 		var object struct {
-			SecretKeyHash string `db:"secret_key_hash"`
-			MediaType     string `db:"media_type"`
-			Available     bool   `db:"available"`
+			SecretKeyHash string    `db:"secret_key_hash"`
+			MediaType     string    `db:"media_type"`
+			CreatedAt     time.Time `db:"created_at"`
+			Available     bool      `db:"available"`
 		}
 		err = h.DB.GetContext(ctx, &object, `
-   SELECT u.secret_key_hash, i.media_type, (
+   SELECT u.secret_key_hash, i.media_type, i.created_at, (
      u.profile_image_id IS NOT DISTINCT FROM i.id
      OR EXISTS (
        SELECT 1 FROM posts p
@@ -89,7 +90,11 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		accelPath, ok := h.ImageCache.AccelPath(input.ImageID)
 		if !ok {
 			var data []byte
-			err = h.DB.GetContext(ctx, &data, `SELECT data FROM image_objects WHERE id = $1`, input.ImageID)
+			// created_at は image_objects のパーティションキー。取得済みの値で
+			// 対象パーティションに絞って画像データを読む。
+			err = h.DB.GetContext(ctx, &data, `
+   SELECT data FROM image_objects WHERE id = $1 AND created_at = $2
+  `, input.ImageID, object.CreatedAt)
 			if errors.Is(err, sql.ErrNoRows) {
 				return NewAPIError(http.StatusForbidden, "image_forbidden")
 			}
