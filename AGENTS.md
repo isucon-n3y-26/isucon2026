@@ -12,6 +12,7 @@ bash provisioning/bench-bot/flow.sh --force        # origin/main を取り込ん
 
 | スクリプト | 役割 |
 |---|---|
+| `provisioning/bench-bot/measure.sh` | PR を最新の main にマージした状態で計測し、スコアを台帳に記録する (改善の進め方は `isucon-improve` skill) |
 | `provisioning/bench-bot/flow.sh` | 下のすべてを続けて実行する |
 | `provisioning/deploy.sh` | 全サーバーへデプロイする |
 | `provisioning/bench-bot/enqueue.sh` | ベンチを実行し、スコアとログを出す |
