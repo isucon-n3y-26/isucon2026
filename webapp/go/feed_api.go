@@ -55,6 +55,9 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
+		if !viewer.HasPostedToday {
+			return c.JSON(http.StatusOK, getFeedResponse{Items: []feedItemResponse{}})
+		}
 		following := map[string]bool{}
 		if input.Feed == "following" {
 			var followeeIDs []string
