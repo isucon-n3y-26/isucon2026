@@ -39,6 +39,19 @@ func (ic *ImageCache) AccelPath(imageID string) (string, bool) {
 	return imageCacheInternalPrefix + relativePath, true
 }
 
+// Get はキャッシュされた画像ファイルを読み込む。
+func (ic *ImageCache) Get(imageID string) ([]byte, bool) {
+	relativePath, ok := ic.relativePath(imageID)
+	if !ok {
+		return nil, false
+	}
+	data, err := os.ReadFile(filepath.Join(ic.Dir, relativePath))
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
 // Put はファイルを書き込む。失敗しても DB から配信できるのでログだけ残す。
 func (ic *ImageCache) Put(imageID string, data []byte) bool {
 	relativePath, ok := ic.relativePath(imageID)
