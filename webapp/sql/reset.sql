@@ -3,6 +3,9 @@ SET session_replication_role = replica;
 BEGIN;
 
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE INDEX IF NOT EXISTS login_sessions_active_token_hash ON login_sessions(token_hash) WHERE active;
+CREATE INDEX IF NOT EXISTS login_sessions_active_user_id ON login_sessions(user_id) WHERE active;
 
 DELETE FROM notifications WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM comments WHERE created_at > (SELECT created_at FROM initial_data_boundary);
