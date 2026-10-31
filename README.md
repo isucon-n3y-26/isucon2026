@@ -62,11 +62,11 @@ bash provisioning/deploy.sh
 git add -A && git commit -m "fix: ..."
 git push origin main
 
-# 3. 全サーバーへデプロイしてベンチマーク実行（結果が揃うまで約4分待つ）
-bash provisioning/bench.sh
+# 3. 全サーバーへデプロイしてベンチマーク実行
+bash provisioning/bench-bot/flow.sh
 ```
 
-`bench.sh` は `deploy.sh` 完了後に `bench-bot/enqueue.sh` を実行します。デプロイに失敗した場合はベンチを開始しません。スコア、ベンチのログ、3サーバー集約の alp が標準出力に出て、Discord にも通知されます。詳しくは [AGENTS.md](AGENTS.md) を参照してください。
+`flow.sh` はデプロイ、SQL 統計のリセット、ベンチ、alp とスロークエリの確認、Discord 通知を続けて行います。デプロイに失敗した場合はベンチを開始しません。`bench.sh` も同じ処理を実行します。詳しくは [AGENTS.md](AGENTS.md) を参照してください。
 
 1台だけにデプロイしたい場合:
 
@@ -100,7 +100,7 @@ bash provisioning/deploy.sh america1
 ├── provisioning/
 │   ├── setup_server.sh   # 【初回のみ】ローカルリポジトリを全サーバーへ rsync
 │   ├── deploy.sh         # 【通常】rsync + go build + systemctl restart
-│   ├── bench.sh          # 全サーバーへデプロイしてベンチマーク
+│   ├── bench.sh          # bench-bot/flow.sh を実行する
 │   ├── fetch_webapp.sh   # 【初回のみ】asia1 → ローカルへ webapp を取得
 │   └── deploy_webapp.sh  # 旧方式（使用しない）
 └── webapp/

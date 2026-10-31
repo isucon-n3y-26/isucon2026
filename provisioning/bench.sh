@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# 全サーバーへデプロイしてからベンチマークを実行する。
-# 使い方: bash provisioning/bench.sh
+# 全サーバーへデプロイしてからベンチマークを実行する。処理は bench-bot/flow.sh にまとめている。
+# 使い方: bash provisioning/bench.sh [--skip-deploy] [--force]
 
 set -euo pipefail
 
-if [[ "$#" -ne 0 ]]; then
-  echo "Usage: $0" >&2
-  exit 2
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "==> Deploying to all app servers and syncing the DB config ..."
-bash "$SCRIPT_DIR/deploy.sh"
-
-echo "==> Starting the benchmark and waiting for results ..."
-bash "$SCRIPT_DIR/bench-bot/enqueue.sh"
+exec bash "$SCRIPT_DIR/bench-bot/flow.sh" "$@"
