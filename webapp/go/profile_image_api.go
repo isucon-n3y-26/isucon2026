@@ -21,12 +21,13 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		img, err := jpeg.Decode(bytes.NewReader(data))
+		// プロフィール画像は元データを保存するため、寸法の確認だけで全画素を展開しない。
+		config, err := jpeg.DecodeConfig(bytes.NewReader(data))
 		if err != nil {
 			c.Set("abuse", "invalid_image")
 			return NewAPIError(http.StatusBadRequest, "invalid_profile_image")
 		}
-		if img.Bounds().Dx() > 512 || img.Bounds().Dy() > 512 {
+		if config.Width > 512 || config.Height > 512 {
 			return NewAPIError(http.StatusBadRequest, "invalid_profile_image")
 		}
 
