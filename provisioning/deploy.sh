@@ -6,9 +6,6 @@
 #   bash provisioning/deploy.sh           # asia1, europe1, america1 に全デプロイ
 #   bash provisioning/deploy.sh asia1     # asia1 だけにデプロイ
 #
-# デプロイ完了後:
-#   ポータルからベンチマークを実行する: https://portal.isucon.net/contestant
-#
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -155,8 +152,5 @@ if [ ${#FAILED_HOSTS[@]} -gt 0 ]; then
   exit 1
 else
   echo "[OK] All health checks passed!"
-  echo ""
-  echo "Next: Run benchmark from the portal"
-  echo "  https://portal.isucon.net/contestant"
   echo "========================================="
 fi
