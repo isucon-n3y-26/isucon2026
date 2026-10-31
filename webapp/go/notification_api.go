@@ -29,7 +29,7 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		notificationEvents, unsubscribe := h.notificationHub.subscribe()
+		notificationEvents, unsubscribe := h.notificationHub.subscribe(userID)
 		defer unsubscribe()
 
 		response := c.Response()
@@ -39,10 +39,6 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := controller.Flush(); err != nil {
 			return nil
 		}
-		// Revalidate account and region changes infrequently while waiting. Notification
-		// delivery itself is event-driven through PostgreSQL LISTEN/NOTIFY.
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
 		checkRecipient := func() bool {
 			user, err := getUser(ctx, h.DB, userID)
 			if err != nil {
@@ -111,10 +107,6 @@ func getNotificationsHandler(h *HandlerContext) echo.HandlerFunc {
 					return nil
 				}
 				if delivered {
-					return nil
-				}
-			case <-ticker.C:
-				if !checkRecipient() {
 					return nil
 				}
 			}

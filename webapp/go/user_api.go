@@ -221,6 +221,9 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 			if _, err := tx.ExecContext(ctx, `UPDATE users SET region = $2, updated_at = clock_timestamp() WHERE id = $1`, session.UserID, *input.Region); err != nil {
 				return err
 			}
+			if _, err := tx.ExecContext(ctx, `SELECT pg_notify($1, $2)`, notificationRecipientChangedChannel, session.UserID); err != nil {
+				return err
+			}
 		}
 		user, err := getUser(ctx, tx, session.UserID)
 		if errors.Is(err, sql.ErrNoRows) {
