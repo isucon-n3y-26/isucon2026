@@ -35,6 +35,8 @@ INSERT INTO friend_requests (id, requester_id, recipient_id, status, created_at,
 SELECT id, requester_id, recipient_id, status, created_at, updated_at FROM initial_friend_requests;
 INSERT INTO friendships (id, user_low_id, user_high_id, source_request_id, created_at, updated_at)
 SELECT id, user_low_id, user_high_id, source_request_id, created_at, updated_at FROM initial_friendships;
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id);
 INSERT INTO follows (id, follower_id, followee_id, created_at, updated_at)
 SELECT id, follower_id, followee_id, created_at, updated_at FROM initial_follows;
 INSERT INTO block_relations (id, blocker_id, blocked_id, created_at)
