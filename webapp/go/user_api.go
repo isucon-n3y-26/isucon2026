@@ -127,13 +127,10 @@ func loginHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
 		ctx := c.Request().Context()
-		tx, err := h.DB.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
+		// 資格情報の検証はロックなし・トランザクション外で行う。
+		// ユーザー行のロックと status の再確認は createLoginSessionTx が1回だけ行う。
 		var user User
-		err = tx.GetContext(ctx, &user, `SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status FROM users WHERE username = $1 FOR NO KEY UPDATE`, input.Username)
+		err := h.DB.GetContext(ctx, &user, `SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status FROM users WHERE username = $1`, input.Username)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
@@ -144,7 +141,16 @@ func loginHandler(h *HandlerContext) echo.HandlerFunc {
 		if user.Status != "active" || user.SecretKeyHash != hex.EncodeToString(hash[:]) {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
+		tx, err := h.DB.BeginTxx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
 		session, err := createLoginSessionTx(ctx, tx, user.ID)
+		if errors.Is(err, errLoginUserNotActive) {
+			// 検証後にアカウントが削除された場合
+			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
+		}
 		if err != nil {
 			return err
 		}

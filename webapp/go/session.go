@@ -123,12 +123,17 @@ func CreateLoginSession(db *sqlx.DB, userID string) (*Session, error) {
 	return session, nil
 }
 
+var errLoginUserNotActive = errors.New("user is not active")
+
 func createLoginSessionTx(ctx context.Context, tx *sqlx.Tx, userID string) (*Session, error) {
 	randomToken := uuid.NewString()
 	tokenHashBytes := sha256.Sum256([]byte(randomToken))
 	tokenHash := hex.EncodeToString(tokenHashBytes[:])
 	var lockedUserID string
 	if err := tx.GetContext(ctx, &lockedUserID, `SELECT id FROM users WHERE id = $1 AND status = 'active' FOR NO KEY UPDATE`, userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errLoginUserNotActive
+		}
 		return nil, fmt.Errorf("failed to lock user: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
