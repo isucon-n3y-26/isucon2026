@@ -1,0 +1,17 @@
+[Unit]
+Description=ISUCON bench bot (deploy detection, benchmark, Discord notification)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=isucon
+WorkingDirectory=/home/isucon/bench-bot
+EnvironmentFile=/home/isucon/bench-bot/env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /home/isucon/bench-bot/bot.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
