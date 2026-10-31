@@ -45,6 +45,8 @@ func NewServer(config *Config) *echo.Echo {
 		panic("failed to open database: " + err.Error())
 	}
 	db.SetMaxOpenConns(30)
+	// 既定の2本だと同時実行のたびに切断と再接続を繰り返す。海外サーバーでは1回の接続に数百 ms かかる。
+	db.SetMaxIdleConns(30)
 	err = db.Ping()
 	if err != nil {
 		panic("failed to ping database: " + err.Error())
