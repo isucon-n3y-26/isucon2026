@@ -72,11 +72,7 @@ func getFeedHandler(h *HandlerContext) echo.HandlerFunc {
 		if ranked {
 			beforePostedAt, beforeID = nil, ""
 		}
-		posts, err := selectPostsWithAuthor(ctx, h.DB, `
-   AND p.author_id <> $1 AND w.ended_at IS NULL
-   AND ($2::timestamptz IS NULL OR (p.posted_at, p.id) < ($2, $3))
-   ORDER BY p.posted_at DESC, p.id DESC
-  `, viewer.ID, beforePostedAt, beforeID)
+		posts, err := selectFeedPosts(ctx, h.DB, viewer, following, input.Feed, beforePostedAt, beforeID)
 		if err != nil {
 			return err
 		}
@@ -187,6 +183,93 @@ func recommendationScores(ctx context.Context, db sqlx.QueryerContext, viewer vi
 		scores[post.ID] = 10*friendEngagements[post.ID] + 3*int64(viewer.MutualFriends[post.AuthorID]) + min(connections[post.AuthorID], 30)
 	}
 	return scores, nil
+}
+
+func selectFeedPosts(ctx context.Context, db sqlx.QueryerContext, viewer viewerContext, following map[string]bool, feed string, beforePostedAt *time.Time, beforeID string) ([]PostWithAuthor, error) {
+	if !viewer.HasPostedToday {
+		return nil, nil
+	}
+	switch feed {
+	case "friends":
+		authorIDs := make([]string, 0, len(viewer.Friends))
+		for id := range viewer.Friends {
+			if id != viewer.ID && !viewer.Blocked[id] {
+				authorIDs = append(authorIDs, id)
+			}
+		}
+		if len(authorIDs) == 0 {
+			return nil, nil
+		}
+		query, args, err := sqlx.In(`
+   AND p.author_id IN (?) AND p.visibility IN ('public', 'friends', 'friends_of_friends') AND w.ended_at IS NULL
+   AND (?::timestamptz IS NULL OR (p.posted_at, p.id) < (?::timestamptz, ?))
+   ORDER BY p.posted_at DESC, p.id DESC LIMIT 51
+  `, authorIDs, beforePostedAt, beforePostedAt, beforeID)
+		if err != nil {
+			return nil, err
+		}
+		return selectPostsWithAuthor(ctx, db, sqlx.Rebind(sqlx.DOLLAR, query), args...)
+
+	case "following":
+		authorIDs := make([]string, 0, len(following))
+		for id := range following {
+			if id != viewer.ID && !viewer.Blocked[id] {
+				authorIDs = append(authorIDs, id)
+			}
+		}
+		if len(authorIDs) == 0 {
+			return nil, nil
+		}
+		query, args, err := sqlx.In(`
+   AND p.author_id IN (?) AND w.ended_at IS NULL
+   AND (?::timestamptz IS NULL OR (p.posted_at, p.id) < (?::timestamptz, ?))
+   ORDER BY p.posted_at DESC, p.id DESC
+  `, authorIDs, beforePostedAt, beforePostedAt, beforeID)
+		if err != nil {
+			return nil, err
+		}
+		return selectPostsWithAuthor(ctx, db, sqlx.Rebind(sqlx.DOLLAR, query), args...)
+
+	case "friends-of-friends":
+		authorIDs := make([]string, 0, len(viewer.FriendsOfFriends))
+		for id := range viewer.FriendsOfFriends {
+			if id != viewer.ID && !viewer.Friends[id] && !viewer.Blocked[id] {
+				authorIDs = append(authorIDs, id)
+			}
+		}
+		if len(authorIDs) == 0 {
+			return nil, nil
+		}
+		query, args, err := sqlx.In(`
+   AND p.author_id IN (?) AND p.visibility IN ('public', 'friends_of_friends') AND w.ended_at IS NULL
+   ORDER BY p.posted_at DESC, p.id DESC
+  `, authorIDs)
+		if err != nil {
+			return nil, err
+		}
+		return selectPostsWithAuthor(ctx, db, sqlx.Rebind(sqlx.DOLLAR, query), args...)
+
+	case "public":
+		excludedIDs := make([]string, 0, 1+len(viewer.Blocked))
+		excludedIDs = append(excludedIDs, viewer.ID)
+		for id := range viewer.Blocked {
+			if id != viewer.ID {
+				excludedIDs = append(excludedIDs, id)
+			}
+		}
+		query, args, err := sqlx.In(`
+   AND p.author_id NOT IN (?) AND p.visibility = 'public' AND w.ended_at IS NULL
+   AND (?::timestamptz IS NULL OR (p.posted_at, p.id) < (?::timestamptz, ?))
+   ORDER BY p.posted_at DESC, p.id DESC LIMIT 51
+  `, excludedIDs, beforePostedAt, beforePostedAt, beforeID)
+		if err != nil {
+			return nil, err
+		}
+		return selectPostsWithAuthor(ctx, db, sqlx.Rebind(sqlx.DOLLAR, query), args...)
+
+	default:
+		return nil, nil
+	}
 }
 
 func matchesFeed(viewer viewerContext, following map[string]bool, post Post, feed string) bool {
