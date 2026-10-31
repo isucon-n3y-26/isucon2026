@@ -43,7 +43,10 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		if _, err := tx.ExecContext(ctx, `LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		// 同じリージョンの開始を直列化する。users のテーブルロックは使わない。
+		// (通知の対象は INSERT ... SELECT のスナップショットで決まり、並行する登録・退会・リージョン変更は
+		// 開始の前か後かのどちらかに並べられるため、テーブルロックは不要。)
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "posting_window_open:"+region); err != nil {
 			return err
 		}
 		var conflict bool
@@ -52,6 +55,11 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		if conflict {
 			return NewAPIError(http.StatusConflict, "posting_window_conflict")
+		}
+		// 現在の投稿期間の行ロックを取り、実行中の投稿 (createPostHandler が FOR UPDATE で同じ行を握る) の
+		// コミットを待ってから開始時刻を決める。これにより、旧期間の投稿の postedAt は必ず startsAt より前になる。
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, region); err != nil {
+			return err
 		}
 		var startsAt time.Time
 		if err := tx.GetContext(ctx, &startsAt, `SELECT clock_timestamp()`); err != nil {
