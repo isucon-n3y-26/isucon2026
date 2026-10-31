@@ -41,34 +41,15 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 
 		ctx := c.Request().Context()
-		var secretKeyHash string
-		err = h.DB.GetContext(ctx, &secretKeyHash, `
-   SELECT u.secret_key_hash
-   FROM image_objects i JOIN users u ON u.id = i.owner_user_id
-   WHERE i.id = $1 AND u.status = 'active'
-  `, input.ImageID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return NewAPIError(http.StatusForbidden, "image_forbidden")
+		// 署名の鍵と削除状態を1往復で取得する。削除状態は毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
+		var object struct {
+			SecretKeyHash string `db:"secret_key_hash"`
+			MediaType     string `db:"media_type"`
+			Available     bool   `db:"available"`
 		}
-		if err != nil {
-			return err
-		}
-		key, err := imageSigningKey(secretKeyHash)
-		if err != nil {
-			return err
-		}
-		if !hmac.Equal(sig, imageSignature(key, input.ImageID, exp)) {
-			c.Set("abuse", "invalid_signature")
-			return NewAPIError(http.StatusForbidden, "image_forbidden")
-		}
-
-		// 削除状態を毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
-		var mediaType string
-		err = h.DB.GetContext(ctx, &mediaType, `
-   SELECT i.media_type
-   FROM image_objects i JOIN users u ON u.id = i.owner_user_id AND u.status = 'active'
-   WHERE i.id = $1 AND (
-     u.profile_image_id = i.id
+		err = h.DB.GetContext(ctx, &object, `
+   SELECT u.secret_key_hash, i.media_type, (
+     u.profile_image_id IS NOT DISTINCT FROM i.id
      OR EXISTS (
        SELECT 1 FROM posts p
        WHERE p.image_id = i.id AND p.author_id = u.id AND p.deleted_at IS NULL
@@ -79,13 +60,26 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
        JOIN users author ON author.id = p.author_id AND author.status = 'active'
        WHERE r.image_id = i.id AND r.reactor_id = u.id AND r.replaced_at IS NULL AND r.deleted_at IS NULL
      )
-   )
+   ) AS available
+   FROM image_objects i JOIN users u ON u.id = i.owner_user_id
+   WHERE i.id = $1 AND u.status = 'active'
   `, input.ImageID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
 		if err != nil {
 			return err
+		}
+		key, err := imageSigningKey(object.SecretKeyHash)
+		if err != nil {
+			return err
+		}
+		if !hmac.Equal(sig, imageSignature(key, input.ImageID, exp)) {
+			c.Set("abuse", "invalid_signature")
+			return NewAPIError(http.StatusForbidden, "image_forbidden")
+		}
+		if !object.Available {
+			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
 		if exp <= time.Now().Unix() {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
@@ -103,14 +97,14 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 				return err
 			}
 			if !h.ImageCache.Put(input.ImageID, data) {
-				return c.Blob(http.StatusOK, mediaType, data)
+				return c.Blob(http.StatusOK, object.MediaType, data)
 			}
 			accelPath, ok = h.ImageCache.AccelPath(input.ImageID)
 			if !ok {
-				return c.Blob(http.StatusOK, mediaType, data)
+				return c.Blob(http.StatusOK, object.MediaType, data)
 			}
 		}
-		c.Response().Header().Set("Content-Type", mediaType)
+		c.Response().Header().Set("Content-Type", object.MediaType)
 		c.Response().Header().Set("X-Accel-Redirect", accelPath)
 		return c.NoContent(http.StatusOK)
 	}
