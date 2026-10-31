@@ -2,6 +2,7 @@ package isureal
 
 import (
 	"os"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v5"
@@ -20,6 +21,16 @@ func NewServer(config *Config) *echo.Echo {
 	if !validRegion(config.Region) {
 		panic("invalid server region: " + config.Region)
 	}
+
+	// 期限切れの署名キャッシュを定期的に削除する。
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for range t.C {
+			purgeExpiredImageSigCache()
+		}
+	}()
+
 	e := echo.New()
 	e.IPExtractor = extractClientIP
 
