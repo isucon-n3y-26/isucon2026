@@ -11,3 +11,9 @@ webapp/rust/target/
 
 # macOS拡張属性
 ._*
+
+# Ruby bundler ローカル設定
+webapp/ruby/.bundle/
+
+# Rust ビルド成果物 (実行バイナリ)
+webapp/rust/isureal
