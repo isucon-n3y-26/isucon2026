@@ -25,6 +25,8 @@ BEGIN
 END $$;
 DELETE FROM image_objects WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM users WHERE created_at > (SELECT created_at FROM initial_data_boundary);
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_key ON users(username);
 
 UPDATE users u
 SET display_name = i.display_name, bio = i.bio, profile_image_id = i.profile_image_id, region = i.region,
