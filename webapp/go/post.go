@@ -117,6 +117,9 @@ func loadViewerContext(ctx context.Context, db sqlx.QueryerContext, viewerID str
  `, viewer.ID, viewer.Region); err != nil {
 		return viewer, err
 	}
+	if !viewer.HasPostedToday {
+		return viewer, nil
+	}
 	if viewer.Blocked, err = getBlockedUserIDs(ctx, db, viewer.ID); err != nil {
 		return viewer, err
 	}

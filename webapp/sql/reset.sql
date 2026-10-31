@@ -3,6 +3,9 @@ SET session_replication_role = replica;
 BEGIN;
 
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE INDEX IF NOT EXISTS login_sessions_active_token_hash ON login_sessions(token_hash) WHERE active;
+CREATE INDEX IF NOT EXISTS login_sessions_active_user_id ON login_sessions(user_id) WHERE active;
 
 DELETE FROM notifications WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM comments WHERE created_at > (SELECT created_at FROM initial_data_boundary);
@@ -33,16 +36,22 @@ WHERE u.id = i.id
 
 INSERT INTO friend_requests (id, requester_id, recipient_id, status, created_at, updated_at)
 SELECT id, requester_id, recipient_id, status, created_at, updated_at FROM initial_friend_requests;
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE INDEX IF NOT EXISTS friend_requests_pending_requester_recipient ON friend_requests(requester_id, recipient_id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS friend_requests_pending_recipient ON friend_requests(recipient_id) WHERE status = 'pending';
 INSERT INTO friendships (id, user_low_id, user_high_id, source_request_id, created_at, updated_at)
 SELECT id, user_low_id, user_high_id, source_request_id, created_at, updated_at FROM initial_friendships;
 -- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
 CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id);
 INSERT INTO follows (id, follower_id, followee_id, created_at, updated_at)
 SELECT id, follower_id, followee_id, created_at, updated_at FROM initial_follows;
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE INDEX IF NOT EXISTS follows_followee_id ON follows(followee_id);
 INSERT INTO block_relations (id, blocker_id, blocked_id, created_at)
 SELECT id, blocker_id, blocked_id, created_at FROM initial_block_relations;
 -- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
 CREATE INDEX IF NOT EXISTS posts_image_id ON posts(image_id);
+CREATE INDEX IF NOT EXISTS posts_author_id_posting_window_id ON posts(author_id, posting_window_id);
 CREATE INDEX IF NOT EXISTS realmojis_image_id ON realmojis(image_id);
 
 COMMIT;
