@@ -46,6 +46,10 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
 		if _, err := tx.ExecContext(ctx, `LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			return err
 		}
+		// 実行中の投稿の完了を待ってから開始時刻を決める。
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, region); err != nil {
+			return err
+		}
 		var conflict bool
 		if err := tx.GetContext(ctx, &conflict, `SELECT EXISTS(SELECT 1 FROM posting_windows WHERE region = $1 AND local_date >= $2)`, region, localDate); err != nil {
 			return err
