@@ -59,7 +59,7 @@ func NewServer(config *Config) *echo.Echo {
 		ImageCache:      &ImageCache{Dir: config.ImageCacheDir},
 		notificationHub: newNotificationHub(config.Region),
 	}
-	startPostingWindowListener(config.DatabaseDSN(), handlerContext.notificationHub)
+	startNotificationListener(config.DatabaseDSN(), handlerContext.notificationHub)
 	e.Use(IPBanMiddleware(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))

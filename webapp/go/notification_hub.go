@@ -10,24 +10,29 @@ import (
 )
 
 const postingWindowStartedChannel = "posting_window_started"
+const notificationRecipientChangedChannel = "notification_recipient_changed"
+
+type notificationSubscriber struct {
+	userID string
+}
 
 type notificationHub struct {
 	region      string
 	mu          sync.Mutex
-	subscribers map[chan struct{}]struct{}
+	subscribers map[chan struct{}]notificationSubscriber
 }
 
 func newNotificationHub(region string) *notificationHub {
 	return &notificationHub{
 		region:      region,
-		subscribers: make(map[chan struct{}]struct{}),
+		subscribers: make(map[chan struct{}]notificationSubscriber),
 	}
 }
 
-func (h *notificationHub) subscribe() (<-chan struct{}, func()) {
+func (h *notificationHub) subscribe(userID string) (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	h.mu.Lock()
-	h.subscribers[ch] = struct{}{}
+	h.subscribers[ch] = notificationSubscriber{userID: userID}
 	h.mu.Unlock()
 
 	return ch, func() {
@@ -44,20 +49,34 @@ func (h *notificationHub) notifyRegion(region string) {
 	h.notifyAll()
 }
 
+func (h *notificationHub) notifyUser(userID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch, subscriber := range h.subscribers {
+		if subscriber.userID != userID {
+			continue
+		}
+		wakeNotificationSubscriber(ch)
+	}
+}
+
 func (h *notificationHub) notifyAll() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.subscribers {
-		select {
-		case ch <- struct{}{}:
-		default:
-			// A buffered wake-up is already pending. The handler reads the
-			// notification table after waking, so duplicate signals can coalesce.
-		}
+		wakeNotificationSubscriber(ch)
 	}
 }
 
-func startPostingWindowListener(databaseDSN string, hub *notificationHub) {
+func wakeNotificationSubscriber(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+		// A buffered wake-up is already pending. The handler rechecks durable state.
+	}
+}
+
+func startNotificationListener(databaseDSN string, hub *notificationHub) {
 	go func() {
 		ctx := context.Background()
 		retryDelay := time.Second
@@ -70,8 +89,15 @@ func startPostingWindowListener(databaseDSN string, hub *notificationHub) {
 				continue
 			}
 
-			if _, err := conn.Exec(ctx, "LISTEN "+postingWindowStartedChannel); err != nil {
-				log.Printf("notification listener: failed to LISTEN: %v", err)
+			listenFailed := false
+			for _, channel := range []string{postingWindowStartedChannel, notificationRecipientChangedChannel} {
+				if _, err := conn.Exec(ctx, "LISTEN "+channel); err != nil {
+					log.Printf("notification listener: failed to LISTEN: %v", err)
+					listenFailed = true
+					break
+				}
+			}
+			if listenFailed {
 				_ = conn.Close(ctx)
 				waitBeforeNotificationRetry(ctx, retryDelay)
 				retryDelay = nextNotificationRetryDelay(retryDelay)
@@ -88,8 +114,11 @@ func startPostingWindowListener(databaseDSN string, hub *notificationHub) {
 					log.Printf("notification listener: connection lost: %v", err)
 					break
 				}
-				if notification.Channel == postingWindowStartedChannel {
+				switch notification.Channel {
+				case postingWindowStartedChannel:
 					hub.notifyRegion(notification.Payload)
+				case notificationRecipientChangedChannel:
+					hub.notifyUser(notification.Payload)
 				}
 			}
 			_ = conn.Close(ctx)
