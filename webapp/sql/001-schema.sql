@@ -15,6 +15,7 @@ DROP TABLE IF EXISTS
   administrator_sessions,
   login_sessions,
   administrators,
+  image_object_lookup,
   users,
   image_objects;
 
@@ -84,6 +85,32 @@ CREATE TABLE users (
 );
 CREATE UNIQUE INDEX users_username_key ON users(username);
 ALTER TABLE image_objects ADD CONSTRAINT image_objects_owner_fk FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE RESTRICT;
+
+-- image_objects は created_at でパーティション化されているため、id から実データの
+-- パーティションへ直接到達するための小さな非パーティション表を持つ。
+CREATE TABLE image_object_lookup (
+  id varchar(36) PRIMARY KEY,
+  created_at timestamptz NOT NULL,
+  owner_user_id varchar(36) NOT NULL,
+  media_type text NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION sync_image_object_lookup() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    DELETE FROM image_object_lookup WHERE id = OLD.id;
+    RETURN OLD;
+  END IF;
+
+  INSERT INTO image_object_lookup (id, created_at, owner_user_id, media_type)
+  VALUES (NEW.id, NEW.created_at, NEW.owner_user_id, NEW.media_type);
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER image_objects_lookup_sync
+AFTER INSERT OR DELETE ON image_objects
+FOR EACH ROW EXECUTE FUNCTION sync_image_object_lookup();
 
 -- 2026-09-10 管理者を消す時のオペレーションはどうすればよいですか？
 -- 2026-09-13 消すことは想定されていません

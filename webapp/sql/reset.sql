@@ -2,6 +2,35 @@ SET session_replication_role = replica;
 
 BEGIN;
 
+-- 既存DBにも lookup 表と同期トリガーを追加する。
+CREATE TABLE IF NOT EXISTS image_object_lookup (
+  id varchar(36) PRIMARY KEY,
+  created_at timestamptz NOT NULL,
+  owner_user_id varchar(36) NOT NULL,
+  media_type text NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION sync_image_object_lookup() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    DELETE FROM image_object_lookup WHERE id = OLD.id;
+    RETURN OLD;
+  END IF;
+
+  INSERT INTO image_object_lookup (id, created_at, owner_user_id, media_type)
+  VALUES (NEW.id, NEW.created_at, NEW.owner_user_id, NEW.media_type);
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS image_objects_lookup_sync ON image_objects;
+CREATE TRIGGER image_objects_lookup_sync
+AFTER INSERT OR DELETE ON image_objects
+FOR EACH ROW EXECUTE FUNCTION sync_image_object_lookup();
+
+-- 以下で image_objects のパーティションを TRUNCATE するため、行トリガーではなく
+-- 初期データから再構築する。
+TRUNCATE image_object_lookup;
+
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
 -- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
 CREATE INDEX IF NOT EXISTS login_sessions_active_token_hash ON login_sessions(token_hash) WHERE active;
@@ -25,6 +54,8 @@ BEGIN
 END $$;
 DELETE FROM image_objects WHERE created_at > (SELECT created_at FROM initial_data_boundary);
 DELETE FROM users WHERE created_at > (SELECT created_at FROM initial_data_boundary);
+INSERT INTO image_object_lookup (id, created_at, owner_user_id, media_type)
+SELECT id, created_at, owner_user_id, media_type FROM image_objects;
 -- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_key ON users(username);
 
