@@ -3,8 +3,9 @@
 # 【通常サイクル】全Appサーバーで git pull → Go ビルド → サービス再起動 → ヘルスチェック
 #
 # 使い方:
-#   bash provisioning/deploy.sh           # asia1, europe1, america1 に全デプロイ
-#   bash provisioning/deploy.sh asia1     # asia1 だけにデプロイ
+#   bash provisioning/deploy.sh           # asia1, europe1, america1 と DB 設定をデプロイ
+#   bash provisioning/deploy.sh asia1     # asia1 と DB 設定をデプロイ
+#   bash provisioning/deploy.sh db       # DB 設定だけをデプロイ
 #
 set -eu
 
@@ -13,6 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REMOTE_REPO_DIR="/home/isucon/isucon2026"
 REMOTE_WEBAPP_DIR="/home/isucon/webapp"
 ACCESS_LOG="/var/log/nginx/access.json.log"
+DB_HOST="isucon@54.65.131.246"
+DB_CONFIG_SOURCE="$SCRIPT_DIR/postgresql/99-query-observability.conf"
 
 get_host() {
   case "$1" in
@@ -25,11 +28,77 @@ get_host() {
 
 SSH_OPTS="-o StrictHostKeyChecking=no"
 
-# 引数でサーバーを絞り込めるようにする
+deploy_db_config() {
+  echo ""
+  echo "========================================="
+  echo "==> Deploying PostgreSQL config to asia2 ($DB_HOST) ..."
+  echo "========================================="
+
+  if [ ! -f "$DB_CONFIG_SOURCE" ]; then
+    echo "ERROR: PostgreSQL config not found: $DB_CONFIG_SOURCE" >&2
+    exit 1
+  fi
+
+  DB_PG_CONFIG_FILE=$(ssh $SSH_OPTS "$DB_HOST" \
+    "sudo -u postgres psql -XAt -d postgres -c 'SHOW config_file'")
+  DB_CLUSTER_INFO=$(ssh $SSH_OPTS "$DB_HOST" \
+    "pg_lsclusters --no-header | awk '\$3 == 5432 && \$4 == \"online\" { print \$1, \$2; exit }'")
+  if [ -z "$DB_PG_CONFIG_FILE" ] || [ -z "$DB_CLUSTER_INFO" ]; then
+    echo "ERROR: could not find the active PostgreSQL cluster on asia2." >&2
+    exit 1
+  fi
+  read -r DB_PG_VERSION DB_CLUSTER <<EOF
+$DB_CLUSTER_INFO
+EOF
+  DB_CONFIG_DIR="$(dirname "$DB_PG_CONFIG_FILE")/conf.d"
+
+  ssh $SSH_OPTS "$DB_HOST" \
+    "sudo install -d -o root -g postgres -m 0755 '$DB_CONFIG_DIR'"
+
+  DB_CONFIG_CHANGES=$(rsync -azi --no-owner --no-group \
+    --out-format='%i %n' \
+    --rsync-path="sudo -n rsync" \
+    -e "ssh $SSH_OPTS" \
+    "$DB_CONFIG_SOURCE" \
+    "$DB_HOST:$DB_CONFIG_DIR/99-query-observability.conf")
+
+  if [ -n "$DB_CONFIG_CHANGES" ]; then
+    echo "$DB_CONFIG_CHANGES"
+    echo "--> Reloading PostgreSQL configuration ..."
+    ssh $SSH_OPTS "$DB_HOST" \
+      "sudo pg_ctlcluster '$DB_PG_VERSION' '$DB_CLUSTER' reload"
+  else
+    echo "--> PostgreSQL config unchanged."
+  fi
+}
+
+# 引数でアプリサーバーを絞り込める。DB 設定は毎回同期し、db/asia2 のみなら DB 設定だけを反映する。
 if [ $# -ge 1 ]; then
-  TARGET_NAMES=("$@")
+  TARGET_NAMES=()
+  APP_TARGET_SELECTED=0
+  for TARGET_NAME in "$@"; do
+    case "$TARGET_NAME" in
+      db|asia2)
+        ;;
+      asia1|europe1|america1)
+        TARGET_NAMES+=("$TARGET_NAME")
+        APP_TARGET_SELECTED=1
+        ;;
+      *)
+        echo "ERROR: Unknown server name '$TARGET_NAME'. Valid: asia1, europe1, america1, db, asia2" >&2
+        exit 1
+        ;;
+    esac
+  done
 else
   TARGET_NAMES=("asia1" "europe1" "america1")
+  APP_TARGET_SELECTED=1
+fi
+
+deploy_db_config
+if [ "$APP_TARGET_SELECTED" -eq 0 ]; then
+  echo "DB config deployment finished."
+  exit 0
 fi
 
 for NAME in "${TARGET_NAMES[@]}"; do

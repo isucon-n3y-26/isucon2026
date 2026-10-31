@@ -1,6 +1,6 @@
 # isucon2026
 
-## 開発ワークフロー（確定版・動作確認済み）
+## 開発ワークフロー
 
 ```
 [ローカル / Bob]
@@ -10,6 +10,7 @@
     └─ bash provisioning/deploy.sh
               │
               ├─ rsync (ローカルリポジトリ → 各サーバー)
+              ├─ rsync (PostgreSQL 設定 → asia2、変更時 reload)
               ├─ rsync (webapp/ → /home/isucon/webapp/)
               ├─ go build
               └─ systemctl restart isureal-go
@@ -61,14 +62,11 @@ bash provisioning/deploy.sh
 git add -A && git commit -m "fix: ..."
 git push origin main
 
-# 3. 全サーバーへデプロイ（約10〜20秒）
-bash provisioning/deploy.sh
-
-# 4. ベンチマーク実行（結果が揃うまで約4分待つ）
-bash provisioning/bench-bot/enqueue.sh
+# 3. 全サーバーへデプロイしてベンチマーク実行（結果が揃うまで約4分待つ）
+bash provisioning/bench.sh
 ```
 
-スコア、ベンチのログ、3サーバー集約の alp が標準出力に出て、Discord にも通知されます。詳しくは [AGENTS.md](AGENTS.md) を参照してください。
+`bench.sh` は `deploy.sh` 完了後に `bench-bot/enqueue.sh` を実行します。デプロイに失敗した場合はベンチを開始しません。スコア、ベンチのログ、3サーバー集約の alp が標準出力に出て、Discord にも通知されます。詳しくは [AGENTS.md](AGENTS.md) を参照してください。
 
 1台だけにデプロイしたい場合:
 
@@ -102,6 +100,7 @@ bash provisioning/deploy.sh america1
 ├── provisioning/
 │   ├── setup_server.sh   # 【初回のみ】ローカルリポジトリを全サーバーへ rsync
 │   ├── deploy.sh         # 【通常】rsync + go build + systemctl restart
+│   ├── bench.sh          # 全サーバーへデプロイしてベンチマーク
 │   ├── fetch_webapp.sh   # 【初回のみ】asia1 → ローカルへ webapp を取得
 │   └── deploy_webapp.sh  # 旧方式（使用しない）
 └── webapp/
@@ -120,6 +119,33 @@ bash provisioning/deploy.sh america1
 PGPASSWORD="$ISUREAL_DB_PASSWORD" psql \
   -h "$ISUREAL_DB_HOST" -p "$ISUREAL_DB_PORT" \
   -U "$ISUREAL_DB_USER" -d "$ISUREAL_DB_NAME"
+```
+
+## PostgreSQL クエリログの解析
+
+asia2 に pgBadger と `pg_stat_statements` を導入し、20ms 以上の SQL とロック待ちをログへ出力します。`shared_preload_libraries` に `pg_stat_statements` を追加するため、初回実行時は PostgreSQL が再起動します。
+
+```bash
+bash provisioning/deploy.sh db
+bash provisioning/install_db_observability.sh
+bash provisioning/profile_db.sh
+```
+
+`deploy.sh` は通常のアプリデプロイ時にも PostgreSQL の設定ファイルを asia2 の `conf.d` に rsync し、変更があれば設定を reload します。初回の拡張導入では `deploy.sh db` を先に実行してください。
+
+3つ目のコマンドは `pg_stat_statements` からSQL別の累積実行時間上位20件を標準出力します。実行回数、累積・平均・最大時間、返却行数、共有ブロック読み込み数、一時ブロック書き込み数を表示します。統計値は PostgreSQL で統計をリセットしてからの累積です。
+
+`pg_stat_statements` の累積実行時間上位を確認する例です。
+
+```bash
+ssh isucon@54.65.131.246 'sudo -u postgres psql -d postgres -c "
+SELECT calls,
+       round(total_exec_time::numeric, 1) AS total_ms,
+       round(mean_exec_time::numeric, 2) AS mean_ms,
+       query
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 20;"'
 ```
 
 ## DB 初期化
