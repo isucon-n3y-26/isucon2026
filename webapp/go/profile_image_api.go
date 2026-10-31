@@ -7,6 +7,7 @@ import (
 	"image/jpeg"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -49,7 +50,8 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects(id,owner_user_id,data,media_type) VALUES ($1,$2,$3,'image/jpeg')`, imageID, userID, data); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE users SET profile_image_id=$2,updated_at=clock_timestamp() WHERE id=$1`, userID, imageID); err != nil {
+		var updatedUser User
+		if err := tx.GetContext(ctx, &updatedUser, `UPDATE users SET profile_image_id=$2,updated_at=clock_timestamp() WHERE id=$1 RETURNING `+strings.Join(userColumns, ", "), userID, imageID); err != nil {
 			return err
 		}
 		if oldID != nil {
@@ -60,6 +62,7 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		globalUserSearchCache.UpsertUser(updatedUser)
 		h.ImageCache.Put(imageID, data)
 		if oldID != nil {
 			h.ImageCache.Remove(*oldID)
@@ -88,7 +91,8 @@ func deleteProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if imageID == nil {
 			return NewAPIError(http.StatusNotFound, "account_not_found")
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE users SET profile_image_id=NULL,updated_at=clock_timestamp() WHERE id=$1`, userID); err != nil {
+		var updatedUser User
+		if err := tx.GetContext(ctx, &updatedUser, `UPDATE users SET profile_image_id=NULL,updated_at=clock_timestamp() WHERE id=$1 RETURNING `+strings.Join(userColumns, ", "), userID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM image_objects WHERE id=$1`, *imageID); err != nil {
@@ -97,6 +101,7 @@ func deleteProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		globalUserSearchCache.UpsertUser(updatedUser)
 		h.ImageCache.Remove(*imageID)
 		return c.NoContent(http.StatusNoContent)
 	}

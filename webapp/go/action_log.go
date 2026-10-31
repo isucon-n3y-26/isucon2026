@@ -55,7 +55,7 @@ var actionNames = map[string]string{
 
 var logLevelRanks = map[string]int{"debug": 0, "info": 1, "error": 2}
 
-func ActionLogMiddleware(minLevel string, output io.Writer) echo.MiddlewareFunc {
+func ActionLogMiddleware(h *HandlerContext, minLevel string, output io.Writer) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			err := next(c)
@@ -64,26 +64,33 @@ func ActionLogMiddleware(minLevel string, output io.Writer) echo.MiddlewareFunc 
 			}
 			_, status := echo.ResolveResponseStatus(c.Response(), err)
 
+			route := c.RouteInfo()
+			action, ok := actionNames[route.Method+" "+route.Path]
+			abuse, _ := c.Get("abuse").(string)
+			ip := c.RealIP()
+
+			if status >= http.StatusBadRequest && h != nil && h.IPBans != nil {
+				h.IPBans.RecordFailure(h.DB, ip, action, status, abuse)
+			}
+
 			level := "info"
 			switch {
 			case status >= http.StatusInternalServerError:
 				level = "error"
-			case c.Request().Method == http.MethodGet && !(status == http.StatusForbidden && c.Get("abuse") == "invalid_signature"):
+			case c.Request().Method == http.MethodGet && !(status == http.StatusForbidden && abuse == "invalid_signature"):
 				level = "debug"
 			}
 			if logLevelRanks[level] < logLevelRanks[minLevel] {
 				return nil
 			}
 
-			route := c.RouteInfo()
 			entry := map[string]any{
 				"level":   level,
 				"action":  nil,
 				"status":  status,
-				"ip":      c.RealIP(),
+				"ip":      ip,
 				"user_id": nil,
 			}
-			action, ok := actionNames[route.Method+" "+route.Path]
 			if ok {
 				entry["action"] = action
 			}
@@ -96,7 +103,6 @@ func ActionLogMiddleware(minLevel string, output io.Writer) echo.MiddlewareFunc 
 					entry["username"] = username
 				}
 			}
-			abuse, _ := c.Get("abuse").(string)
 			if abuse != "" {
 				entry["abuse"] = abuse
 			}

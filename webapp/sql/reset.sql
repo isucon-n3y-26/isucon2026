@@ -56,4 +56,54 @@ CREATE INDEX IF NOT EXISTS posts_image_id ON posts(image_id);
 CREATE INDEX IF NOT EXISTS posts_author_id_posting_window_id ON posts(author_id, posting_window_id);
 CREATE INDEX IF NOT EXISTS realmojis_image_id ON realmojis(image_id);
 
+CREATE OR REPLACE FUNCTION notify_ip_bans_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+    PERFORM pg_notify('ip_bans_changed', json_build_object(
+      'ip', NEW.ip,
+      'banned_until', extract(epoch from NEW.banned_until)::bigint
+    )::text);
+  ELSE
+    PERFORM pg_notify('ip_bans_changed', '*');
+  END IF;
+  RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS ip_bans_changed_notify ON ip_bans;
+CREATE TRIGGER ip_bans_changed_notify
+AFTER INSERT OR UPDATE OR DELETE ON ip_bans
+FOR EACH ROW EXECUTE FUNCTION notify_ip_bans_changed();
+
+CREATE OR REPLACE FUNCTION notify_users_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' OR NEW.status <> 'active' THEN
+    PERFORM pg_notify('users_changed', json_build_object(
+      'op', 'delete',
+      'id', COALESCE(NEW.id, OLD.id)
+    )::text);
+  ELSE
+    PERFORM pg_notify('users_changed', json_build_object(
+      'op', 'upsert',
+      'id', NEW.id,
+      'username', NEW.username,
+      'secret_key_hash', NEW.secret_key_hash,
+      'display_name', NEW.display_name,
+      'bio', NEW.bio,
+      'profile_image_id', NEW.profile_image_id,
+      'region', NEW.region,
+      'account_type', NEW.account_type,
+      'status', NEW.status
+    )::text);
+  END IF;
+  RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS users_changed_notify ON users;
+CREATE TRIGGER users_changed_notify
+AFTER INSERT OR UPDATE OR DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION notify_users_changed();
+
+SELECT pg_notify('ip_bans_changed', '*');
+SELECT pg_notify('users_changed', '*');
+
 COMMIT;

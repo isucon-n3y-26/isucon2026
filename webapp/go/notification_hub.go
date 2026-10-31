@@ -11,6 +11,8 @@ import (
 
 const postingWindowStartedChannel = "posting_window_started"
 const notificationRecipientChangedChannel = "notification_recipient_changed"
+const ipBansChangedChannel = "ip_bans_changed"
+const usersChangedChannel = "users_changed"
 
 type notificationSubscriber struct {
 	userID string
@@ -76,7 +78,8 @@ func wakeNotificationSubscriber(ch chan struct{}) {
 	}
 }
 
-func startNotificationListener(databaseDSN string, hub *notificationHub) {
+func startNotificationListener(databaseDSN string, h *HandlerContext) {
+	hub := h.notificationHub
 	go func() {
 		ctx := context.Background()
 		retryDelay := time.Second
@@ -90,7 +93,12 @@ func startNotificationListener(databaseDSN string, hub *notificationHub) {
 			}
 
 			listenFailed := false
-			for _, channel := range []string{postingWindowStartedChannel, notificationRecipientChangedChannel} {
+			for _, channel := range []string{
+				postingWindowStartedChannel,
+				notificationRecipientChangedChannel,
+				ipBansChangedChannel,
+				usersChangedChannel,
+			} {
 				if _, err := conn.Exec(ctx, "LISTEN "+channel); err != nil {
 					log.Printf("notification listener: failed to LISTEN: %v", err)
 					listenFailed = true
@@ -107,6 +115,10 @@ func startNotificationListener(databaseDSN string, hub *notificationHub) {
 			retryDelay = time.Second
 			// Recheck durable rows after startup or reconnect. This recovers signals
 			// that may have been sent while this listener connection was down.
+			if h.IPBans != nil {
+				_ = h.IPBans.Reload(ctx, h.DB)
+			}
+			_ = globalUserSearchCache.ReloadAll(ctx, h.DB)
 			hub.notifyAll()
 			for {
 				notification, err := conn.WaitForNotification(ctx)
@@ -119,6 +131,15 @@ func startNotificationListener(databaseDSN string, hub *notificationHub) {
 					hub.notifyRegion(notification.Payload)
 				case notificationRecipientChangedChannel:
 					hub.notifyUser(notification.Payload)
+				case ipBansChangedChannel:
+					if h.IPBans != nil {
+						if notification.Payload == "*" {
+							h.IPBans.Reset()
+						}
+						h.IPBans.ApplyNotify(ctx, h.DB, notification.Payload)
+					}
+				case usersChangedChannel:
+					globalUserSearchCache.ApplyNotify(ctx, h.DB, notification.Payload)
 				}
 			}
 			_ = conn.Close(ctx)

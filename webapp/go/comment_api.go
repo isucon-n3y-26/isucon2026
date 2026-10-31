@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,7 +36,8 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_interaction")
 		}
 		ctx := c.Request().Context()
-		actor := GetSession(c).UserID
+		session := GetSession(c)
+		actor := session.UserID
 		post, err := getPost(ctx, h.DB, input.PostID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
@@ -50,11 +50,9 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		for _, id := range slices.Compact([]string{min(actor, post.AuthorID), max(actor, post.AuthorID)}) {
-			var lockedID string
-			if err := tx.GetContext(ctx, &lockedID, `SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE`, id); err != nil {
-				return err
-			}
+		var lockedIDs []string
+		if err := tx.SelectContext(ctx, &lockedIDs, `SELECT id FROM users WHERE id IN ($1, $2) ORDER BY id FOR NO KEY UPDATE`, min(actor, post.AuthorID), max(actor, post.AuthorID)); err != nil {
+			return err
 		}
 		allowed, err := canComment(ctx, tx, actor, post.ID)
 		if err != nil {
@@ -64,21 +62,18 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusForbidden, "interaction_forbidden")
 		}
 		id := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id,post_id,author_id,body,created_at) VALUES($1,$2,$3,$4,clock_timestamp())`, id, post.ID, actor, input.Body); err != nil {
-			return err
-		}
-		comment, err := getComment(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		user, err := getUser(ctx, tx, actor)
-		if err != nil {
+		var comment Comment
+		if err := tx.GetContext(ctx, &comment, `
+			INSERT INTO comments(id,post_id,author_id,body,created_at)
+			VALUES($1,$2,$3,$4,clock_timestamp())
+			RETURNING id, post_id, author_id, body, created_at
+		`, id, post.ID, actor, input.Body); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		return c.JSON(http.StatusCreated, newCommentResponse(comment, user))
+		return c.JSON(http.StatusCreated, newCommentResponse(comment, session.User))
 	}
 }
 

@@ -109,71 +109,83 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			_, _ = h.DB.ExecContext(cleanupCtx, `DELETE FROM image_objects WHERE id = $1 AND created_at = $2`, imageID, imageCreatedAt)
 		}()
 
-		tx, err := h.DB.BeginTxx(ctx, nil)
+		postID := uuid.NewString()
+		var row struct {
+			User
+			WindowID       *string    `db:"window_id"`
+			OnTimeDeadline *time.Time `db:"on_time_deadline"`
+			InsertedPostID *string    `db:"inserted_post_id"`
+			PostedAt       *time.Time `db:"posted_at"`
+		}
+		const createPostCTE = `
+			WITH u AS (
+				SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status
+				FROM users
+				WHERE id = $1 AND status = 'active'
+				FOR NO KEY UPDATE
+			), w AS (
+				SELECT pw.id, pw.local_date, pw.starts_at, pw.on_time_deadline
+				FROM posting_windows pw
+				JOIN u ON pw.region = u.region
+				WHERE pw.ended_at IS NULL
+				FOR UPDATE OF pw
+			), ts AS (
+				SELECT clock_timestamp() AS posted_at FROM w
+			), counts AS (
+				SELECT count(*) FILTER (WHERE p.deleted_at IS NULL) AS active,
+				       count(*) FILTER (WHERE p.deleted_at IS NOT NULL) AS deleted
+				FROM posts p
+				JOIN posting_windows pw2 ON pw2.id = p.posting_window_id
+				JOIN w ON pw2.local_date = w.local_date
+				WHERE p.author_id = $1
+			), ins AS (
+				INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
+				                   location_kind, latitude, longitude, locality, posted_at)
+				SELECT $2, u.id, w.id, $3, $4, $5, $6, $7, $8, $9, ts.posted_at
+				FROM u, w, counts c, ts
+				WHERE c.active = 0 AND c.deleted < 2 AND ts.posted_at >= w.starts_at
+				RETURNING id, posted_at
+			)
+			SELECT u.id, u.username, u.secret_key_hash, u.display_name, u.bio, u.profile_image_id, u.region, u.account_type, u.status,
+			       w.id AS window_id,
+			       w.on_time_deadline,
+			       (SELECT id FROM ins) AS inserted_post_id,
+			       (SELECT posted_at FROM ins) AS posted_at
+			FROM u
+			LEFT JOIN w ON true
+		`
+		err = h.DB.GetContext(ctx, &row, createPostCTE,
+			userID, postID, imageID, input.Caption, input.Visibility,
+			location.Kind, location.Latitude, location.Longitude, location.Locality)
+		if err == nil && row.WindowID == nil {
+			// 切り替え待ちの間に旧期間の行が終了すると、この文のスナップショットには新期間の行が見えず window_id が NULL になる。
+			// 新期間を読み直すために1回再実行する。
+			err = h.DB.GetContext(ctx, &row, createPostCTE,
+				userID, postID, imageID, input.Caption, input.Visibility,
+				location.Kind, location.Latitude, location.Longitude, location.Locality)
+		}
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback()
-		var lockedUserID string
-		if err := tx.GetContext(ctx, &lockedUserID, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
-			return err
-		}
-		user, err := getUser(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
-		var window struct {
-			ID        string    `db:"id"`
-			LocalDate time.Time `db:"local_date"`
-			StartsAt  time.Time `db:"starts_at"`
-		}
-		// FOR UPDATE は投稿期間の切り替えと排他する (openPostingWindowHandler が同じ行を握る)。
-		// 切り替え待ちの間に旧期間の行が終了すると、この文のスナップショットには新期間の行が見えず 0 行になる。
-		// 下の再実行は無駄ではなく、新期間を読み直すために必要 (外すと切り替え中の投稿が 409 になる)。
-		err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, user.Region)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, user.Region)
-		}
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return NewAPIError(http.StatusConflict, "post_slot_unavailable")
-			}
-			return err
-		}
-		var counts struct {
-			Active  int `db:"active"`
-			Deleted int `db:"deleted"`
-		}
-		if err := tx.GetContext(ctx, &counts, `
-   SELECT count(*) FILTER (WHERE deleted_at IS NULL) AS active,
-          count(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted
-   FROM posts p JOIN posting_windows w ON w.id = p.posting_window_id
-   WHERE p.author_id = $1 AND w.local_date = $2
-  `, userID, window.LocalDate); err != nil {
-			return err
-		}
-		postedAt := time.Now().UTC()
-		if counts.Active != 0 || counts.Deleted >= 2 || postedAt.Before(window.StartsAt) {
+		if row.WindowID == nil || row.InsertedPostID == nil || row.PostedAt == nil {
 			return NewAPIError(http.StatusConflict, "post_slot_unavailable")
 		}
-		postID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `
-   INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
-                      location_kind, latitude, longitude, locality, posted_at)
-   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-  `, postID, userID, window.ID, imageID, input.Caption, input.Visibility,
-			location.Kind, location.Latitude, location.Longitude, location.Locality, postedAt); err != nil {
-			return err
-		}
-		// Commit の結果が不明なまま画像を消すと、コミット済みの投稿の画像を消しかねないので、先に印を付ける。
 		committed = true
-		if err := tx.Commit(); err != nil {
+		user := row.User
+		if err := user.setImageKey(); err != nil {
 			return err
 		}
-		// ロックを手放してから読む。
-		post, err := getPost(ctx, h.DB, postID)
-		if err != nil {
-			return err
+		post := Post{
+			ID:              postID,
+			AuthorID:        userID,
+			PostingWindowID: *row.WindowID,
+			ImageID:         imageID,
+			Caption:         input.Caption,
+			Visibility:      input.Visibility,
+			PostLocation:    location,
+			PostedAt:        *row.PostedAt,
+			OnTimeDeadline:  *row.OnTimeDeadline,
+			WindowEndedAt:   nil,
 		}
 		h.ImageCache.Put(imageID, imageData)
 		return c.JSON(http.StatusCreated, newPostResponse(post, user))
@@ -203,34 +215,23 @@ type getMyCurrentPostResponse createPostResponse
 func getMyCurrentPostHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		ctx := c.Request().Context()
-		userID := GetSession(c).UserID
-		var postID string
-		err := h.DB.GetContext(ctx, &postID, `
-   SELECT p.id FROM posts p
-   JOIN posting_windows w ON w.id = p.posting_window_id
-   JOIN users u ON u.id = p.author_id
-   JOIN posting_windows current ON current.region = u.region AND current.ended_at IS NULL
-                              AND current.local_date = w.local_date
-   WHERE p.author_id = $1 AND p.deleted_at IS NULL
-  `, userID)
+		session := GetSession(c)
+		var post Post
+		err := h.DB.GetContext(ctx, &post, `
+			SELECT `+postColumns+`
+			FROM posts p
+			JOIN posting_windows w ON w.id = p.posting_window_id
+			JOIN posting_windows current ON current.region = $2 AND current.ended_at IS NULL
+			                            AND current.local_date = w.local_date
+			WHERE p.author_id = $1 AND p.deleted_at IS NULL
+		`, session.UserID, session.Region)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "post_not_found")
 		}
 		if err != nil {
 			return err
 		}
-		post, err := getPost(ctx, h.DB, postID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return NewAPIError(http.StatusNotFound, "post_not_found")
-		}
-		if err != nil {
-			return err
-		}
-		user, err := getUser(ctx, h.DB, userID)
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, getMyCurrentPostResponse(newPostResponse(post, user)))
+		return c.JSON(http.StatusOK, getMyCurrentPostResponse(newPostResponse(post, session.User)))
 	}
 }
 
@@ -293,7 +294,8 @@ func updatePostHandler(h *HandlerContext) echo.HandlerFunc {
 			}
 		}
 		ctx := c.Request().Context()
-		userID := GetSession(c).UserID
+		session := GetSession(c)
+		userID := session.UserID
 		tx, err := h.DB.BeginTxx(ctx, nil)
 		if err != nil {
 			return err
@@ -310,38 +312,27 @@ func updatePostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		if post.AuthorID != userID {
+		if post.AuthorID != userID || post.WindowEndedAt != nil {
 			return NewAPIError(http.StatusForbidden, "post_not_editable")
 		}
-		window, err := getPostingWindow(ctx, tx, post.PostingWindowID)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE posts
+			SET caption = COALESCE($2, caption),
+			    visibility = COALESCE($3, visibility)
+			WHERE id = $1
+		`, post.ID, input.Caption, input.Visibility); err != nil {
 			return err
-		}
-		if window.EndedAt != nil {
-			return NewAPIError(http.StatusForbidden, "post_not_editable")
 		}
 		if input.Caption != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE posts SET caption = $2 WHERE id = $1`, post.ID, *input.Caption); err != nil {
-				return err
-			}
+			post.Caption = *input.Caption
 		}
 		if input.Visibility != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE posts SET visibility = $2 WHERE id = $1`, post.ID, *input.Visibility); err != nil {
-				return err
-			}
-		}
-		post, err = getPost(ctx, tx, post.ID)
-		if err != nil {
-			return err
-		}
-		user, err := getUser(ctx, tx, userID)
-		if err != nil {
-			return err
+			post.Visibility = *input.Visibility
 		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		return c.JSON(http.StatusOK, updatePostResponse(newPostResponse(post, user)))
+		return c.JSON(http.StatusOK, updatePostResponse(newPostResponse(post, session.User)))
 	}
 }
 

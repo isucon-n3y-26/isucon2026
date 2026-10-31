@@ -1,6 +1,7 @@
 package isureal
 
 import (
+	"context"
 	"os"
 	"time"
 
@@ -36,10 +37,6 @@ func NewServer(config *Config) *echo.Echo {
 	e := echo.New()
 	e.IPExtractor = extractClientIP
 
-	e.Use(ActionLogMiddleware(config.LogLevel, os.Stdout))
-	e.Use(middleware.Recover())
-	e.HTTPErrorHandler = APIErrorHandler
-
 	db, err := sqlx.Open("pgx", config.DatabaseDSN())
 	if err != nil {
 		panic("failed to open database: " + err.Error())
@@ -55,11 +52,18 @@ func NewServer(config *Config) *echo.Echo {
 	handlerContext := &HandlerContext{
 		DB:              db,
 		Config:          config,
-		IPBans:          &IPBanList{},
+		IPBans:          NewIPBanList(),
 		ImageCache:      &ImageCache{Dir: config.ImageCacheDir},
 		notificationHub: newNotificationHub(config.Region),
 	}
-	startNotificationListener(config.DatabaseDSN(), handlerContext.notificationHub)
+	_ = handlerContext.IPBans.Reload(context.Background(), db)
+	_ = globalUserSearchCache.ReloadAll(context.Background(), db)
+
+	e.Use(ActionLogMiddleware(handlerContext, config.LogLevel, os.Stdout))
+	e.Use(middleware.Recover())
+	e.HTTPErrorHandler = APIErrorHandler
+
+	startNotificationListener(config.DatabaseDSN(), handlerContext)
 	e.Use(IPBanMiddleware(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))

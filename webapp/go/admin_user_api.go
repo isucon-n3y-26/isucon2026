@@ -1,7 +1,10 @@
 package isureal
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/labstack/echo/v5"
 )
@@ -16,17 +19,15 @@ func certifyUserHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := c.Bind(&input); err != nil {
 			return err
 		}
-		result, err := h.DB.ExecContext(c.Request().Context(), `UPDATE users SET account_type='certified_public', updated_at=clock_timestamp() WHERE id=$1 AND status='active' AND account_type='regular'`, input.UserID)
-		if err != nil {
-			return err
-		}
-		count, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if count == 0 {
+		var user User
+		err := h.DB.GetContext(c.Request().Context(), &user, `UPDATE users SET account_type='certified_public', updated_at=clock_timestamp() WHERE id=$1 AND status='active' AND account_type='regular' RETURNING `+strings.Join(userColumns, ", "), input.UserID)
+		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusConflict, "certification_conflict")
 		}
+		if err != nil {
+			return err
+		}
+		globalUserSearchCache.UpsertUser(user)
 		return c.NoContent(http.StatusNoContent)
 	}
 }
