@@ -1,0 +1,13 @@
+# ビルド成果物
+webapp/go/isureal
+webapp/nodejs/node_modules/
+webapp/nodejs/dist/
+webapp/ruby/vendor/
+webapp/python/__pycache__/
+webapp/python/*.pyc
+webapp/php/vendor/
+webapp/perl/local/
+webapp/rust/target/
+
+# macOS拡張属性
+._*
