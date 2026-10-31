@@ -64,9 +64,11 @@ git push origin main
 # 3. 全サーバーへデプロイ（約10〜20秒）
 bash provisioning/deploy.sh
 
-# 4. ポータルからベンチマーク実行
-#    https://portal.isucon.net/contestant
+# 4. ベンチマーク実行（結果が揃うまで約4分待つ）
+bash provisioning/bench-bot/enqueue.sh
 ```
+
+スコア、ベンチのログ、3サーバー集約の alp が標準出力に出て、Discord にも通知されます。詳しくは [AGENTS.md](AGENTS.md) を参照してください。
 
 1台だけにデプロイしたい場合:
 
