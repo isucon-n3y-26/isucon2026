@@ -36,6 +36,24 @@ def job_of(job_id, status, created, score=None):
     return job
 
 
+class DeployedCodeTest(unittest.TestCase):
+    def fake_run(self, dirty):
+        return lambda *args, **kwargs: dirty if "status" in args else "abc subject"
+
+    def test_clean(self):
+        with mock.patch.object(bot, "run", side_effect=self.fake_run("")):
+            self.assertEqual(bot.deployed_code(), "abc subject")
+
+    def test_counts_tracked_changes(self):
+        with mock.patch.object(bot, "run", side_effect=self.fake_run(" M a.go\n M b.go")):
+            self.assertEqual(bot.deployed_code(), "abc subject (未コミットの変更 2 件)")
+
+    def test_ignores_untracked_files(self):
+        with mock.patch.object(bot, "run", side_effect=self.fake_run("")) as run:
+            bot.deployed_code()
+        self.assertTrue(any("--untracked-files=no" in call.args for call in run.call_args_list))
+
+
 class ControllerTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -249,18 +267,19 @@ class CommandTest(unittest.TestCase):
         bot.write_latest_job(self.results, 7)
         os.remove(self.request)
 
-    def test_prints_score_log_and_alp(self):
-        self.steps = [self.accept, self.job_done, lambda: bot.write_result(self.results, 7, "alp.md", "ALP TABLE")]
+    def test_prints_score_and_log_without_waiting_for_alp(self):
+        self.steps = [self.accept, self.job_done]
         code, out = self.enqueue()
         self.assertEqual(code, 0)
-        for text in ("score=1234", "bench log", "ALP TABLE"):
+        for text in ("score=1234", "bench log"):
             self.assertIn(text, out)
+        self.assertNotIn("--- alp ---", out)
+        self.assertEqual(self.clock, 2 * bot.POLL_SECONDS)
 
     def test_failed_job_exits_non_zero(self):
         self.steps = [self.accept, lambda: self.job_done(passed=False, status="ERRORED")]
         code, out = self.enqueue()
         self.assertEqual(code, 1)
-        self.assertIn("alp はありません", out)
 
     def test_bot_not_consuming_request_times_out(self):
         code, out = self.enqueue()
@@ -271,6 +290,15 @@ class CommandTest(unittest.TestCase):
         self.clock = bot.CONTEST_END
         self.assertEqual(self.enqueue()[0], 2)
         self.assertFalse(os.path.exists(self.request))
+
+    def test_result_prints_saved_alp(self):
+        self.job_done()
+        bot.write_result(self.results, 7, "alp.md", "ALP TABLE")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(bot.command_result(7, self.results), 0)
+        for text in ("score=1234", "bench log", "ALP TABLE"):
+            self.assertIn(text, out.getvalue())
 
     def test_result_of_unknown_job(self):
         with contextlib.redirect_stderr(io.StringIO()):

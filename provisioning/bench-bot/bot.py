@@ -23,8 +23,6 @@ SSH_KEY = "/home/isucon/bench-bot/ssh_key"
 # public IP はルーターを迂回するので使わない。
 REMOTES = {"europe1": "192.168.2.10", "america1": "192.168.3.10"}
 POLL_SECONDS = 5
-# 走行が終わってから alp が揃うまでの待ち時間の上限。
-ALP_WAIT_SECONDS = 180
 JOB_WAIT_SECONDS = 900
 CONTEST_END = 1793437200  # 2026-10-31 18:00 JST
 # SSE は nginx のタイムアウト (60秒) で切れてからログに出るので、それより長く待つ。
@@ -94,7 +92,8 @@ def run(*args, **kwargs):
 def deployed_code():
     try:
         commit = run("git", "-C", REPO_DIR, "log", "-1", "--format=%h %s")
-        dirty = run("git", "-C", REPO_DIR, "status", "--porcelain", "--", "webapp", "provisioning")
+        # rsync は古いファイルを消さないので、未追跡のファイルは数えない。
+        dirty = run("git", "-C", REPO_DIR, "status", "--porcelain", "--untracked-files=no", "--", "webapp", "provisioning")
         return commit + (f" (未コミットの変更 {len(dirty.splitlines())} 件)" if dirty else "")
     except (subprocess.SubprocessError, OSError):
         return "不明"
@@ -236,19 +235,20 @@ def read_job_result(results_dir, job_id):
         return None
 
 
-def print_result(results_dir, job_id, result):
+def print_job(job_id, result):
     print(f"Job #{job_id} status={result['status']} passed={str(result['passed']).lower()} score={result['score']}")
     print(f"コード: {result['code']}")
     print("\n--- ベンチのログ ---")
     print(result["log"].strip() or "(なし)")
+
+
+def print_saved_alp(results_dir, job_id):
     print("\n--- alp ---")
     try:
         with open(os.path.join(results_dir, str(job_id), "alp.md"), encoding="utf-8") as f:
             print(f.read().strip())
-        return True
     except FileNotFoundError:
         print("(この走行の alp はありません)")
-        return False
 
 
 def exit_code(result):
@@ -265,7 +265,7 @@ def wait_until(condition, timeout, sleep=time.sleep, now=time.time):
 
 
 def command_enqueue(results_dir=RESULTS_DIR, request_path=REQUEST_PATH, sleep=time.sleep, now=time.time):
-    """ベンチを要求して、結果と alp が揃うまで待って標準出力に出す。"""
+    """ベンチを要求して、走行が終わるまで待って結果を標準出力に出す。alp は provisioning/alp.sh fetch で取る。"""
     if now() >= CONTEST_END:
         print("競技が終了しているので実行しません", file=sys.stderr)
         return 2
@@ -279,11 +279,9 @@ def command_enqueue(results_dir=RESULTS_DIR, request_path=REQUEST_PATH, sleep=ti
     if not wait_until(lambda: read_job_result(results_dir, job_id), JOB_WAIT_SECONDS, sleep, now):
         print(f"Job #{job_id} の完了を確認できませんでした。", file=sys.stderr)
         return 2
-    print("走行が終わりました。alp を待っています。", flush=True)
-    wait_until(lambda: os.path.exists(os.path.join(results_dir, str(job_id), "alp.md")), ALP_WAIT_SECONDS, sleep, now)
     result = read_job_result(results_dir, job_id)
     print()
-    print_result(results_dir, job_id, result)
+    print_job(job_id, result)
     return exit_code(result)
 
 
@@ -293,7 +291,8 @@ def command_result(job_id=None, results_dir=RESULTS_DIR):
     if not result:
         print(f"Job #{job_id} の結果はありません", file=sys.stderr)
         return 2
-    print_result(results_dir, job_id, result)
+    print_job(job_id, result)
+    print_saved_alp(results_dir, job_id)
     return exit_code(result)
 
 

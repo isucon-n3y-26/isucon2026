@@ -1,11 +1,12 @@
 #!/bin/bash
 # enqueue.sh
-# asia1 の bench-bot でベンチを実行し、スコア、ベンチのログ、3サーバー集約の alp を標準出力に出す
-# 投入から alp が揃うまで約4分かかるので、実行ツールのタイムアウトは10分以上にする
+# asia1 の bench-bot でベンチを実行し、スコアとベンチのログを標準出力に出す
+# alp も続けて取るときは flow.sh を使う
+# 実行中のベンチがあると完了まで待つので、実行ツールのタイムアウトは10分以上にする
 #
 # 使い方:
 #   bash provisioning/bench-bot/enqueue.sh              # 実行して結果が揃うまで待つ
-#   bash provisioning/bench-bot/enqueue.sh result       # 最新の走行の結果を出す
+#   bash provisioning/bench-bot/enqueue.sh result       # 最新の走行の結果を、サーバーに保存された alp と一緒に出す
 #   bash provisioning/bench-bot/enqueue.sh result 6891  # 指定した走行の結果を出す
 #
 # 終了コード: 0 = 成功、1 = 走行が FAIL、2 = 結果を取得できない
