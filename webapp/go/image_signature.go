@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const imageURLLifetime = 24 * time.Hour
@@ -32,6 +34,7 @@ type imageSigCacheEntry struct {
 // exp は Unix秒単位で24時間後を指すため、同一 imageID への呼び出しは
 // 1秒以内であれば同じ exp を持ち、高いヒット率が得られる。
 var imageSigCache sync.Map // key: string("imageID:exp") -> imageSigCacheEntry
+var imageSigCacheFlights singleflight.Group
 
 func imageSignature(key []byte, imageID string, exp int64) []byte {
 	cacheKey := imageID + ":" + strconv.FormatInt(exp, 10)
@@ -39,15 +42,24 @@ func imageSignature(key []byte, imageID string, exp int64) []byte {
 		return v.(imageSigCacheEntry).sig
 	}
 
-	value := []byte(strconv.FormatInt(exp, 10) + ":" + imageID)
-	for range imageSignatureIterations {
-		mac := hmac.New(sha256.New, key)
-		mac.Write(value)
-		value = mac.Sum(nil)
-	}
+	value, _, _ := imageSigCacheFlights.Do(cacheKey, func() (any, error) {
+		if v, ok := imageSigCache.Load(cacheKey); ok {
+			return v.(imageSigCacheEntry).sig, nil
+		}
 
-	imageSigCache.Store(cacheKey, imageSigCacheEntry{sig: value, exp: exp})
-	return value
+		value := []byte(strconv.FormatInt(exp, 10) + ":" + imageID)
+		mac := hmac.New(sha256.New, key)
+		for range imageSignatureIterations {
+			// Reset the keyed hash for each round and reuse the consumed input buffer for the digest.
+			mac.Reset()
+			mac.Write(value)
+			value = mac.Sum(value[:0])
+		}
+
+		imageSigCache.Store(cacheKey, imageSigCacheEntry{sig: value, exp: exp})
+		return value, nil
+	})
+	return value.([]byte)
 }
 
 // purgeExpiredImageSigCache は期限切れのキャッシュエントリを削除する。
