@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -212,19 +213,37 @@ func selectFeedPosts(ctx context.Context, db sqlx.QueryerContext, viewer viewerC
 
 	case "following":
 		authorIDs := make([]string, 0, len(following))
+		friendIDs := make([]string, 0, len(viewer.Friends))
+		friendsOfFriendsIDs := make([]string, 0, len(viewer.FriendsOfFriends))
 		for id := range following {
 			if id != viewer.ID && !viewer.Blocked[id] {
 				authorIDs = append(authorIDs, id)
+				if viewer.Friends[id] {
+					friendIDs = append(friendIDs, id)
+				} else if viewer.FriendsOfFriends[id] {
+					friendsOfFriendsIDs = append(friendsOfFriendsIDs, id)
+				}
 			}
 		}
 		if len(authorIDs) == 0 {
 			return nil, nil
 		}
+		visibleConditions := []string{`p.visibility = 'public'`}
+		args := []any{authorIDs}
+		if len(friendIDs) > 0 {
+			visibleConditions = append(visibleConditions, `(p.visibility IN ('friends', 'friends_of_friends') AND p.author_id IN (?))`)
+			args = append(args, friendIDs)
+		}
+		if len(friendsOfFriendsIDs) > 0 {
+			visibleConditions = append(visibleConditions, `(p.visibility = 'friends_of_friends' AND p.author_id IN (?))`)
+			args = append(args, friendsOfFriendsIDs)
+		}
+		args = append(args, beforePostedAt, beforePostedAt, beforeID)
 		query, args, err := sqlx.In(`
-   AND p.author_id IN (?) AND w.ended_at IS NULL
+   AND p.author_id IN (?) AND (`+strings.Join(visibleConditions, ` OR `)+`) AND w.ended_at IS NULL
    AND (?::timestamptz IS NULL OR (p.posted_at, p.id) < (?::timestamptz, ?))
-   ORDER BY p.posted_at DESC, p.id DESC
-  `, authorIDs, beforePostedAt, beforePostedAt, beforeID)
+   ORDER BY p.posted_at DESC, p.id DESC LIMIT 51
+  `, args...)
 		if err != nil {
 			return nil, err
 		}
