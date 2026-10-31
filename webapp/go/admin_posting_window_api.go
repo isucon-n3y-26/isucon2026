@@ -73,6 +73,9 @@ func openPostingWindowHandler(h *HandlerContext) echo.HandlerFunc {
   `, region, windowID, startsAt); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `SELECT pg_notify($1, $2)`, postingWindowStartedChannel, region); err != nil {
+			return err
+		}
 		window, err := getPostingWindow(ctx, tx, windowID)
 		if err != nil {
 			return err
