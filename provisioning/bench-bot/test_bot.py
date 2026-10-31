@@ -1,4 +1,6 @@
 """python3 -m unittest で実行する。ポータルや Discord には接続しない。"""
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -14,7 +16,11 @@ class FakeClient:
         self.enqueued = 0
 
     def list_jobs(self, limit=10):
-        return self.jobs
+        # 実際の API と同じく、一覧には合否とログ (18) を含めない。
+        return [{k: v for k, v in j.items() if k != 18} for j in self.jobs]
+
+    def get_job(self, job_id):
+        return next(j for j in self.jobs if j.get(1) == job_id)
 
     def enqueue(self, target_id):
         self.enqueued += 1
@@ -43,6 +49,7 @@ class ControllerTest(unittest.TestCase):
         return bot.Controller(
             self.client, notify=lambda c, a=None: self.sent.append(c), code=lambda: "abc",
             state_path=os.path.join(self.dir.name, "state.json"), request_path=self.request,
+            results_dir=os.path.join(self.dir.name, "results"),
         )
 
     def request_bench(self):
@@ -88,6 +95,23 @@ class ControllerTest(unittest.TestCase):
         self.controller.tick()
         self.assertEqual(len(self.sent), 1)
         self.assertIn("7368", self.sent[0])
+        self.assertIn("✅", self.sent[0])
+
+    def test_finished_job_writes_result(self):
+        job = job_of(2, 4, 900, 7368)
+        job[18][5] = {2: "bench log"}
+        self.client.jobs.insert(0, job)
+        self.controller.tick()
+        result = bot.read_job_result(self.controller.results_dir, 2)
+        self.assertEqual((result["score"], result["passed"], result["log"]), (7368, True, "bench log"))
+
+    def test_latest_job_is_written_before_request_is_removed(self):
+        self.request_bench()
+        seen = []
+        real_remove = os.remove
+        with mock.patch.object(bot.os, "remove", side_effect=lambda p: (seen.append(bot.read_latest_job(self.controller.results_dir)), real_remove(p))):
+            self.controller.tick()
+        self.assertEqual(seen, [101])
 
     def test_request_survives_restart(self):
         self.request_bench()
@@ -128,6 +152,7 @@ class ReporterTest(unittest.TestCase):
         return bot.Reporter(
             notify=notify or (lambda c, a=None: self.sent.append((c, a))), now=lambda: now, log_path=self.log,
             code=lambda: "abc", remotes={"europe1": "e", "america1": "a"}, remote=self.fake_remote,
+            results_dir=os.path.join(self.dir.name, "results"),
         )
 
     def write(self, count):
@@ -163,6 +188,14 @@ class ReporterTest(unittest.TestCase):
         self.assertIn(("e", "clear"), self.remote_ops)
         self.assertIn(("a", "clear"), self.remote_ops)
 
+    def test_alp_is_saved_for_latest_job(self):
+        results = os.path.join(self.dir.name, "results")
+        bot.write_latest_job(results, 7)
+        mtime = self.write(100)
+        self.reporter(mtime + bot.IDLE_SECONDS).tick()
+        with open(os.path.join(results, "7", "alp.md"), encoding="utf-8") as f:
+            self.assertIn("# 全サーバー", f.read())
+
     def test_small_traffic_is_cleared_silently(self):
         self.remote_lines = 0
         mtime = self.write(bot.MIN_LOG_LINES - 1)
@@ -183,6 +216,65 @@ class ReporterTest(unittest.TestCase):
             self.reporter(mtime + bot.IDLE_SECONDS).tick()
         self.assertEqual(self.sent, [])
         self.assertGreater(os.stat(self.log).st_size, 0)
+
+
+class CommandTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.results = os.path.join(self.dir.name, "results")
+        self.request = os.path.join(self.dir.name, "enqueue.request")
+        self.clock = 0
+        self.steps = []
+
+    def now(self):
+        return self.clock
+
+    def sleep(self, seconds):
+        self.clock += seconds
+        if self.steps:
+            self.steps.pop(0)()
+
+    def enqueue(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = bot.command_enqueue(self.results, self.request, self.sleep, self.now)
+        return code, out.getvalue()
+
+    def job_done(self, passed=True, status="FINISHED"):
+        bot.write_result(self.results, 7, "job.json", json.dumps(
+            {"job": 7, "status": status, "passed": passed, "score": 1234, "code": "abc", "log": "bench log"}))
+
+    def accept(self):
+        bot.write_latest_job(self.results, 7)
+        os.remove(self.request)
+
+    def test_prints_score_log_and_alp(self):
+        self.steps = [self.accept, self.job_done, lambda: bot.write_result(self.results, 7, "alp.md", "ALP TABLE")]
+        code, out = self.enqueue()
+        self.assertEqual(code, 0)
+        for text in ("score=1234", "bench log", "ALP TABLE"):
+            self.assertIn(text, out)
+
+    def test_failed_job_exits_non_zero(self):
+        self.steps = [self.accept, lambda: self.job_done(passed=False, status="ERRORED")]
+        code, out = self.enqueue()
+        self.assertEqual(code, 1)
+        self.assertIn("alp はありません", out)
+
+    def test_bot_not_consuming_request_times_out(self):
+        code, out = self.enqueue()
+        self.assertEqual(code, 2)
+        self.assertIn("投入できませんでした", out)
+
+    def test_refuses_after_contest(self):
+        self.clock = bot.CONTEST_END
+        self.assertEqual(self.enqueue()[0], 2)
+        self.assertFalse(os.path.exists(self.request))
+
+    def test_result_of_unknown_job(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(bot.command_result(99, self.results), 2)
 
 
 def line_of(status):

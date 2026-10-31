@@ -7,6 +7,7 @@ asia1 で動かし、他のサーバーのログはルーターを経由する p
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +15,7 @@ import uuid
 
 TARGET_ID = int(os.environ.get("BOT_TARGET_ID", "65"))
 STATE_PATH = os.environ.get("BOT_STATE_PATH", "/home/isucon/bench-bot/state.json")
+RESULTS_DIR = os.environ.get("BOT_RESULTS_DIR", "/home/isucon/bench-bot/results")
 REQUEST_PATH = os.environ.get("BOT_REQUEST_PATH", "/home/isucon/bench-bot/enqueue.request")
 ACCESS_LOG = os.environ.get("BOT_ACCESS_LOG", "/var/log/nginx/access.json.log")
 REPO_DIR = "/home/isucon/isucon2026"
@@ -21,6 +23,9 @@ SSH_KEY = "/home/isucon/bench-bot/ssh_key"
 # public IP はルーターを迂回するので使わない。
 REMOTES = {"europe1": "192.168.2.10", "america1": "192.168.3.10"}
 POLL_SECONDS = 5
+# 走行が終わってから alp が揃うまでの待ち時間の上限。
+ALP_WAIT_SECONDS = 180
+JOB_WAIT_SECONDS = 900
 CONTEST_END = 1793437200  # 2026-10-31 18:00 JST
 # SSE は nginx のタイムアウト (60秒) で切れてからログに出るので、それより長く待つ。
 IDLE_SECONDS = 75
@@ -59,6 +64,29 @@ def send_discord(content, attachment=None):
         raise RuntimeError(f"Discord への送信に失敗 ({e.reason})") from None
 
 
+def write_result(results_dir, job_id, name, text):
+    directory = os.path.join(results_dir, str(job_id))
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, name + ".tmp"), "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(os.path.join(directory, name + ".tmp"), os.path.join(directory, name))
+
+
+def write_latest_job(results_dir, job_id):
+    os.makedirs(results_dir, exist_ok=True)
+    with open(os.path.join(results_dir, "latest_job.tmp"), "w", encoding="utf-8") as f:
+        f.write(str(job_id))
+    os.replace(os.path.join(results_dir, "latest_job.tmp"), os.path.join(results_dir, "latest_job"))
+
+
+def read_latest_job(results_dir):
+    try:
+        with open(os.path.join(results_dir, "latest_job"), encoding="utf-8") as f:
+            return int(f.read())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 def run(*args, **kwargs):
     return subprocess.run(args, capture_output=True, text=True, timeout=60, check=True, **kwargs).stdout.strip()
 
@@ -73,8 +101,8 @@ def deployed_code():
 
 
 class Controller:
-    def __init__(self, client, notify=send_discord, code=deployed_code, state_path=STATE_PATH, request_path=REQUEST_PATH):
-        self.client, self.notify, self.code = client, notify, code
+    def __init__(self, client, notify=send_discord, code=deployed_code, state_path=STATE_PATH, request_path=REQUEST_PATH, results_dir=RESULTS_DIR):
+        self.client, self.notify, self.code, self.results_dir = client, notify, code, results_dir
         self.state_path, self.request_path = state_path, request_path
         self.state = self._load()
 
@@ -96,21 +124,35 @@ class Controller:
 
     def tick(self):
         jobs = self.client.list_jobs(10)
+        self._record_latest(jobs)
         self._notify_finished(jobs)
         if not os.path.exists(self.request_path):
             return
         if any(j.get(4, 0) in JOB_ACTIVE for j in jobs):
             return  # 実行中は投入できない。終わってから最新のコードで1回だけ投入する。
         job = self.client.enqueue(TARGET_ID)
+        # enqueue.sh は要求ファイルが消えたあとに latest_job を読むので、先に書く。
+        self._record_latest(self.client.list_jobs(10))
         os.remove(self.request_path)
         self.notify(f"🚀 ベンチを投入しました: Job #{job.get(1, '?')}\nコード: {self.code()}")
 
+    def _record_latest(self, jobs):
+        if jobs:
+            write_latest_job(self.results_dir, max(j.get(1, 0) for j in jobs))
+
     def _notify_finished(self, jobs):
         finished = [j for j in jobs if j.get(4, 0) not in JOB_ACTIVE and j.get(1, 0) > self.state["notified_job"]]
-        for job in sorted(finished, key=lambda j: j.get(1, 0)):
+        for summary in sorted(finished, key=lambda j: j.get(1, 0)):
+            # 一覧の API には合否とログが含まれない。
+            job = self.client.get_job(summary.get(1))
             passed = job.get(18, {}).get(1) == 1
             mark = "✅" if passed and job.get(4) == 4 else "❌"
             status = JOB_STATUS.get(job.get(4), "UNKNOWN")
+            execution = job.get(18, {}).get(5, {})
+            write_result(self.results_dir, job.get(1), "job.json", json.dumps({
+                "job": job.get(1), "status": status, "passed": passed, "score": job.get(9),
+                "code": self.code(), "log": execution.get(2, ""),
+            }, ensure_ascii=False))
             self.notify(f"{mark} Job #{job.get(1)} {status} スコア: **{job.get(9, '-')}**\nコード: {self.code()}")
             self.state["notified_job"] = job.get(1)
             self._save()
@@ -125,8 +167,9 @@ def call_remote(host, operation):
 
 
 class Reporter:
-    def __init__(self, notify=send_discord, now=time.time, log_path=ACCESS_LOG, code=deployed_code, remotes=REMOTES, remote=call_remote):
+    def __init__(self, notify=send_discord, now=time.time, log_path=ACCESS_LOG, code=deployed_code, remotes=REMOTES, remote=call_remote, results_dir=RESULTS_DIR):
         self.notify, self.now, self.log_path, self.code, self.remotes, self.remote = notify, now, log_path, code, remotes, remote
+        self.results_dir = results_dir
 
     def tick(self):
         try:
@@ -172,13 +215,86 @@ class Reporter:
                 break
             rows.append(row)
         sections = [f"# 全サーバー\n\n{table}"] + [f"# {name}\n\n{self._alp(text)}" for name, text in logs.items()]
-        self.notify(header + "```\n" + "\n".join(rows) + "\n```", ("alp.md", "\n\n".join(sections)))
+        report = "\n\n".join(sections)
+        latest = read_latest_job(self.results_dir)
+        if latest:
+            write_result(self.results_dir, latest, "alp.md", header + "\n" + report + "\n")
+        self.notify(header + "```\n" + "\n".join(rows) + "\n```", ("alp.md", report))
 
 
 def stop_after_contest():
     # 競技終了後は環境の操作が禁止され、追試で再起動もされるので、起動していても何もしない。
     while time.time() >= CONTEST_END:
         time.sleep(3600)
+
+
+def read_job_result(results_dir, job_id):
+    try:
+        with open(os.path.join(results_dir, str(job_id), "job.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def print_result(results_dir, job_id, result):
+    print(f"Job #{job_id} status={result['status']} passed={str(result['passed']).lower()} score={result['score']}")
+    print(f"コード: {result['code']}")
+    print("\n--- ベンチのログ ---")
+    print(result["log"].strip() or "(なし)")
+    print("\n--- alp ---")
+    try:
+        with open(os.path.join(results_dir, str(job_id), "alp.md"), encoding="utf-8") as f:
+            print(f.read().strip())
+        return True
+    except FileNotFoundError:
+        print("(この走行の alp はありません)")
+        return False
+
+
+def exit_code(result):
+    return 0 if result["passed"] and result["status"] == "FINISHED" else 1
+
+
+def wait_until(condition, timeout, sleep=time.sleep, now=time.time):
+    deadline = now() + timeout
+    while not condition():
+        if now() >= deadline:
+            return False
+        sleep(POLL_SECONDS)
+    return True
+
+
+def command_enqueue(results_dir=RESULTS_DIR, request_path=REQUEST_PATH, sleep=time.sleep, now=time.time):
+    """ベンチを要求して、結果と alp が揃うまで待って標準出力に出す。"""
+    if now() >= CONTEST_END:
+        print("競技が終了しているので実行しません", file=sys.stderr)
+        return 2
+    open(request_path, "a").close()
+    print("ベンチの実行を要求しました。実行中のベンチがあれば、その完了後に投入します。", flush=True)
+    if not wait_until(lambda: not os.path.exists(request_path), JOB_WAIT_SECONDS, sleep, now):
+        print("ベンチを投入できませんでした。bench-bot のエラーを確認してください。", file=sys.stderr)
+        return 2
+    job_id = read_latest_job(results_dir)
+    print(f"Job #{job_id} を投入しました。完了を待っています。", flush=True)
+    if not wait_until(lambda: read_job_result(results_dir, job_id), JOB_WAIT_SECONDS, sleep, now):
+        print(f"Job #{job_id} の完了を確認できませんでした。", file=sys.stderr)
+        return 2
+    print("走行が終わりました。alp を待っています。", flush=True)
+    wait_until(lambda: os.path.exists(os.path.join(results_dir, str(job_id), "alp.md")), ALP_WAIT_SECONDS, sleep, now)
+    result = read_job_result(results_dir, job_id)
+    print()
+    print_result(results_dir, job_id, result)
+    return exit_code(result)
+
+
+def command_result(job_id=None, results_dir=RESULTS_DIR):
+    job_id = job_id or read_latest_job(results_dir)
+    result = read_job_result(results_dir, job_id) if job_id else None
+    if not result:
+        print(f"Job #{job_id} の結果はありません", file=sys.stderr)
+        return 2
+    print_result(results_dir, job_id, result)
+    return exit_code(result)
 
 
 def main():
@@ -209,4 +325,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["enqueue"]:
+        sys.exit(command_enqueue())
+    if sys.argv[1:2] == ["result"]:
+        sys.exit(command_result(int(sys.argv[2]) if len(sys.argv) > 2 else None))
     main()
