@@ -48,6 +48,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 			CreatedAt     time.Time `db:"created_at"`
 			Available     bool      `db:"available"`
 		}
+		// image_objects は created_at パーティションなので、id だけの全パーティション検索を避けて lookup 表から取得する。
 		err = h.DB.GetContext(ctx, &object, `
    SELECT u.secret_key_hash, i.media_type, i.created_at, (
      u.profile_image_id IS NOT DISTINCT FROM i.id
@@ -62,7 +63,7 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
        WHERE r.image_id = i.id AND r.reactor_id = u.id AND r.replaced_at IS NULL AND r.deleted_at IS NULL
      )
    ) AS available
-   FROM image_objects i JOIN users u ON u.id = i.owner_user_id
+   FROM image_object_lookup i JOIN users u ON u.id = i.owner_user_id
    WHERE i.id = $1 AND u.status = 'active'
   `, input.ImageID)
 		if errors.Is(err, sql.ErrNoRows) {
