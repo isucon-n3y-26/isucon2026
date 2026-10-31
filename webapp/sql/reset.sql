@@ -1,3 +1,7 @@
+-- 001-schema.sql に追加したインデックスを、スキーマ適用済みの DB にも入れる。
+CREATE INDEX IF NOT EXISTS posts_image_id ON posts(image_id);
+CREATE INDEX IF NOT EXISTS realmojis_image_id ON realmojis(image_id);
+
 SET session_replication_role = replica;
 
 BEGIN;
