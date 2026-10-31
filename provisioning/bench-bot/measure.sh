@@ -37,8 +37,8 @@ PAUSE_FILE="/tmp/isucon2026-measure.pause"
 # 中身は「この時刻まで待たせる epoch 理由」。flow.sh が異常終了しても期限で解除される。
 HOLD_FILE="/tmp/isucon2026-measure.hold"
 HOLD_SECONDS="${MEASURE_HOLD_SECONDS:-1800}"
-# チームメイトは続けて走らせることが多いので、終わってもしばらく待つ。
-COOLDOWN_SECONDS="${MEASURE_COOLDOWN_SECONDS:-300}"
+# 続けて走らせる間に割り込まないよう、終わってから少し待つ。割り込んでも flow.sh は今の走行の終わりを待つので、結果は壊れない。
+COOLDOWN_SECONDS="${MEASURE_COOLDOWN_SECONDS:-60}"
 SERVER_HOME="/home/isucon"
 PAUSE_POLL="${MEASURE_PAUSE_POLL:-15}"
 PAUSE_TIMEOUT="${MEASURE_PAUSE_TIMEOUT:-900}"

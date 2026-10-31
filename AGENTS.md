@@ -34,7 +34,7 @@ bash provisioning/bench-bot/enqueue.sh result 6891  # 指定した走行
 
 ## ベンチを実行する前に
 
-- `flow.sh` を実行すると、`measure.sh queue` は自動で待ち、終わってから5分後に再開する。5分より長く作業するときは `bash provisioning/bench-bot/measure.sh pause "<理由>"` で止め、終わったら `resume` を実行する
+- `flow.sh` を実行すると、`measure.sh queue` は自動で待ち、終わってから1分後に再開する。1分より長く作業するときは `bash provisioning/bench-bot/measure.sh pause "<理由>"` で止め、終わったら `resume` を実行する
 - デプロイしてもベンチは自動で走らない。デプロイとベンチは別の操作
 - サーバーとベンチはチームで共有している。実行中のベンチがあれば、完了後に投入され、同時に実行した全員に同じ結果が返る
 - `provisioning/deploy.sh` は手元のコードで全サーバーを上書きする。ベンチの前に、チームの変更を取り込んでいるか確認する
