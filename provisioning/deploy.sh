@@ -94,7 +94,15 @@ for NAME in "${TARGET_NAMES[@]}"; do
     cd '$REMOTE_WEBAPP_DIR/go'
     /home/isucon/local/go/bin/go build -o isureal cmd/isureal/main.go
 
-    # 4. サービス再起動
+    # 4. nginx 設定を反映 (アプリが X-Accel-Redirect を返すので必ず再起動より先に)
+    echo '--> Applying nginx config ...'
+    mkdir -p /home/isucon/image-cache
+    sudo install -m 644 '$REMOTE_REPO_DIR/provisioning/nginx/sites-available/isureal.conf' /etc/nginx/sites-available/isureal.conf
+    sudo install -m 644 '$REMOTE_REPO_DIR/provisioning/nginx/conf.d/alp-log.conf' /etc/nginx/conf.d/alp-log.conf
+    sudo nginx -t -q
+    sudo systemctl reload nginx.service
+
+    # 5. サービス再起動
     echo '--> Restarting isureal-go.service ...'
     sudo systemctl restart isureal-go.service
 
