@@ -77,11 +77,12 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err != nil {
 			return err
 		}
-		img, err := jpeg.Decode(bytes.NewReader(imageData))
+		// 投稿画像は元データを保存するため、寸法の確認だけで全画素を展開しない。
+		config, err := jpeg.DecodeConfig(bytes.NewReader(imageData))
 		if err != nil {
 			return NewAPIError(http.StatusBadRequest, "invalid_post")
 		}
-		if img.Bounds().Dx() > 4096 || img.Bounds().Dy() > 4096 {
+		if config.Width > 4096 || config.Height > 4096 {
 			return NewAPIError(http.StatusBadRequest, "invalid_post")
 		}
 
