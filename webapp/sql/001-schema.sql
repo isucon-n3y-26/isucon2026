@@ -185,7 +185,8 @@ CREATE TABLE friend_requests (
   updated_at timestamptz NOT NULL
 );
 CREATE INDEX friend_requests_pending_requester_recipient ON friend_requests(requester_id, recipient_id) WHERE status = 'pending';
-CREATE INDEX friend_requests_pending_recipient ON friend_requests(recipient_id) WHERE status = 'pending';
+CREATE INDEX friend_requests_pending_recipient_updated_at_id ON friend_requests(recipient_id, updated_at DESC, id DESC) WHERE status = 'pending';
+CREATE INDEX friend_requests_pending_requester_updated_at_id ON friend_requests(requester_id, updated_at DESC, id DESC) WHERE status = 'pending';
 
 CREATE TABLE realmojis (
   id varchar(36) PRIMARY KEY,
