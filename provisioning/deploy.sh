@@ -166,6 +166,7 @@ for NAME in "${TARGET_NAMES[@]}"; do
     # 4. nginx 設定を反映 (アプリが X-Accel-Redirect を返すので必ず再起動より先に)
     echo '--> Applying nginx config ...'
     mkdir -p /home/isucon/image-cache
+    sudo install -m 644 '$REMOTE_REPO_DIR/provisioning/nginx/nginx.conf' /etc/nginx/nginx.conf
     sudo install -m 644 '$REMOTE_REPO_DIR/provisioning/nginx/sites-available/isureal.conf' /etc/nginx/sites-available/isureal.conf
     sudo install -m 644 '$REMOTE_REPO_DIR/provisioning/nginx/conf.d/alp-log.conf' /etc/nginx/conf.d/alp-log.conf
     sudo nginx -t -q
