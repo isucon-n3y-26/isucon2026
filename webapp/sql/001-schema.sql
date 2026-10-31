@@ -121,6 +121,7 @@ CREATE TABLE friendships (
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   UNIQUE(user_low_id,user_high_id)
 );
+CREATE INDEX friendships_user_high_id ON friendships(user_high_id);
 
 CREATE TABLE follows (
   id varchar(36) PRIMARY KEY,
