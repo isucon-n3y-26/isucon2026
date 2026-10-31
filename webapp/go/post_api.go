@@ -2,6 +2,7 @@ package isureal
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"image/jpeg"
@@ -86,6 +87,27 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 
 		ctx := c.Request().Context()
 		userID := GetSession(c).UserID
+
+		// 画像の INSERT は users と posting_windows の行ロックを取る前に、トランザクションの外で済ませる。
+		// (数百 KB の bytea の書き込みの間、同じリージョンの投稿と投稿期間の切り替えを止めないため。)
+		// 以降の処理が失敗したら孤児になるので、下の defer で消す。孤児は posts / profile / realmoji の
+		// どれからも参照されず、image_api.go は参照のない画像を配信しない。
+		imageID := uuid.NewString()
+		imageCreatedAt := time.Now().UTC()
+		if _, err := h.DB.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, imageID, userID, imageData, imageCreatedAt); err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+			// リクエストが中断されていても消す。created_at を条件に入れてパーティションを絞る。
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_, _ = h.DB.ExecContext(cleanupCtx, `DELETE FROM image_objects WHERE id = $1 AND created_at = $2`, imageID, imageCreatedAt)
+		}()
+
 		tx, err := h.DB.BeginTxx(ctx, nil)
 		if err != nil {
 			return err
@@ -104,6 +126,9 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			LocalDate time.Time `db:"local_date"`
 			StartsAt  time.Time `db:"starts_at"`
 		}
+		// FOR UPDATE は投稿期間の切り替えと排他する (openPostingWindowHandler が同じ行を握る)。
+		// 切り替え待ちの間に旧期間の行が終了すると、この文のスナップショットには新期間の行が見えず 0 行になる。
+		// 下の再実行は無駄ではなく、新期間を読み直すために必要 (外すと切り替え中の投稿が 409 になる)。
 		err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, user.Region)
 		if errors.Is(err, sql.ErrNoRows) {
 			err = tx.GetContext(ctx, &window, `SELECT id, local_date, starts_at FROM posting_windows WHERE region = $1 AND ended_at IS NULL FOR UPDATE`, user.Region)
@@ -130,10 +155,6 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if counts.Active != 0 || counts.Deleted >= 2 || postedAt.Before(window.StartsAt) {
 			return NewAPIError(http.StatusConflict, "post_slot_unavailable")
 		}
-		imageID := uuid.NewString()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES ($1, $2, $3, 'image/jpeg', $4)`, imageID, userID, imageData, postedAt); err != nil {
-			return err
-		}
 		postID := uuid.NewString()
 		if _, err := tx.ExecContext(ctx, `
    INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility,
@@ -143,11 +164,14 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 			location.Kind, location.Latitude, location.Longitude, location.Locality, postedAt); err != nil {
 			return err
 		}
-		post, err := getPost(ctx, tx, postID)
-		if err != nil {
+		// Commit の結果が不明なまま画像を消すと、コミット済みの投稿の画像を消しかねないので、先に印を付ける。
+		committed = true
+		if err := tx.Commit(); err != nil {
 			return err
 		}
-		if err := tx.Commit(); err != nil {
+		// ロックを手放してから読む。
+		post, err := getPost(ctx, h.DB, postID)
+		if err != nil {
 			return err
 		}
 		h.ImageCache.Put(imageID, imageData)
