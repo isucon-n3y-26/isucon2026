@@ -43,8 +43,21 @@ type cachedSearchUser struct {
 	NormDisplayName string
 }
 
+const userSearchRefreshTimeout = 10 * time.Second
+
+type userSearchRefresh struct {
+	done  chan struct{}
+	users []cachedSearchUser
+	err   error
+}
+
 type userSearchCacheStore struct {
-	mu           sync.Mutex
+	// mu は running と next だけを守る。DB への問い合わせ中は持たない。
+	mu      sync.Mutex
+	running *userSearchRefresh
+	next    *userSearchRefresh
+
+	// 以下は runRefreshes のゴルーチンだけが読み書きする。
 	loaded       bool
 	byID         map[string]cachedSearchUser
 	sortedActive []cachedSearchUser
@@ -76,7 +89,7 @@ func buildCachedSearchUser(u User, updatedAt time.Time, rowFP int64) (cachedSear
 	}, nil
 }
 
-func (c *userSearchCacheStore) rebuildSortedLocked() {
+func (c *userSearchCacheStore) rebuildSorted() {
 	active := make([]cachedSearchUser, 0, len(c.byID))
 	var maxUpd time.Time
 	var xorFP int64
@@ -95,7 +108,7 @@ func (c *userSearchCacheStore) rebuildSortedLocked() {
 	c.totalFP = xorFP
 }
 
-func (c *userSearchCacheStore) reloadFullLocked(ctx context.Context, db *sqlx.DB) error {
+func (c *userSearchCacheStore) reloadFull(ctx context.Context, db *sqlx.DB) error {
 	var rows []struct {
 		User
 		UpdatedAt time.Time `db:"updated_at"`
@@ -114,17 +127,56 @@ func (c *userSearchCacheStore) reloadFullLocked(ctx context.Context, db *sqlx.DB
 		byID[r.ID] = entry
 	}
 	c.byID = byID
-	c.rebuildSortedLocked()
+	c.rebuildSorted()
 	c.loaded = true
 	return nil
 }
 
 func (c *userSearchCacheStore) getActiveUsers(ctx context.Context, db *sqlx.DB) ([]cachedSearchUser, error) {
+	refresh := c.joinRefresh(db)
+	select {
+	case <-refresh.done:
+		return refresh.users, refresh.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// 実行中の更新は到着より前に問い合わせを始めた可能性があり、直前の書き込みを
+// 含まないことがある。その結果を使わず、これから始まる更新に相乗りする。
+func (c *userSearchCacheStore) joinRefresh(db *sqlx.DB) *userSearchRefresh {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.running == nil {
+		c.running = &userSearchRefresh{done: make(chan struct{})}
+		go c.runRefreshes(db, c.running)
+		return c.running
+	}
+	if c.next == nil {
+		c.next = &userSearchRefresh{done: make(chan struct{})}
+	}
+	return c.next
+}
 
+// リクエストの切断に他の待機者を巻き込まないよう、Context はリクエストから引き継がない。
+func (c *userSearchCacheStore) runRefreshes(db *sqlx.DB, refresh *userSearchRefresh) {
+	for refresh != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), userSearchRefreshTimeout)
+		refresh.users, refresh.err = c.refresh(ctx, db)
+		cancel()
+		close(refresh.done)
+
+		c.mu.Lock()
+		refresh = c.next
+		c.next = nil
+		c.running = refresh
+		c.mu.Unlock()
+	}
+}
+
+func (c *userSearchCacheStore) refresh(ctx context.Context, db *sqlx.DB) ([]cachedSearchUser, error) {
 	if !c.loaded {
-		if err := c.reloadFullLocked(ctx, db); err != nil {
+		if err := c.reloadFull(ctx, db); err != nil {
 			return nil, err
 		}
 		return c.sortedActive, nil
@@ -204,14 +256,14 @@ func (c *userSearchCacheStore) getActiveUsers(ctx context.Context, db *sqlx.DB) 
 	}
 
 	if len(c.byID) != totalCount || c.totalFP != dbFP {
-		if err := c.reloadFullLocked(ctx, db); err != nil {
+		if err := c.reloadFull(ctx, db); err != nil {
 			return nil, err
 		}
 		return c.sortedActive, nil
 	}
 
 	if changed {
-		c.rebuildSortedLocked()
+		c.rebuildSorted()
 	}
 	return c.sortedActive, nil
 }
