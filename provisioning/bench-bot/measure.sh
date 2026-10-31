@@ -7,6 +7,13 @@
 #   bash provisioning/bench-bot/measure.sh baseline [--runs N]  # origin/main を計測する
 #   bash provisioning/bench-bot/measure.sh pr <番号> [--runs N] [--allow-index-drift]
 #                                                               # PR を計測して main の基準と比べる
+#   bash provisioning/bench-bot/measure.sh queue <番号>... [--runs N]
+#                                                               # PR を順に計測し、結果を PR に投稿する。一時停止中は再開を待つ
+#   bash provisioning/bench-bot/measure.sh report <番号>        # 最新の計測結果を PR に投稿する
+#   bash provisioning/bench-bot/measure.sh pause [理由]         # 今の走行が終わるまで待って、計測を止める
+#   bash provisioning/bench-bot/measure.sh resume               # 計測を再開する (自動の待機も解除する)
+#   bash provisioning/bench-bot/measure.sh hold [理由]          # flow.sh が使う。計測の終わりを待って queue を待たせる
+#   bash provisioning/bench-bot/measure.sh release-hold         # flow.sh が使う。少し間を置いて queue を再開させる
 #   bash provisioning/bench-bot/measure.sh adopt <番号>         # 計測済みの内容のまま PR をマージする
 #   bash provisioning/bench-bot/measure.sh show                 # 台帳を表示する
 #   bash provisioning/bench-bot/measure.sh indexes              # DB の索引を表示する (パーティションを除く)
@@ -26,6 +33,17 @@ ASIA1="isucon@57.181.195.208"
 DB_HOST="isucon@54.65.131.246"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=15)
 LOCK_DIR="/tmp/isucon2026-measure.lock"
+PAUSE_FILE="/tmp/isucon2026-measure.pause"
+# 中身は「この時刻まで待たせる epoch 理由」。flow.sh が異常終了しても期限で解除される。
+HOLD_FILE="/tmp/isucon2026-measure.hold"
+HOLD_SECONDS="${MEASURE_HOLD_SECONDS:-1800}"
+# チームメイトは続けて走らせることが多いので、終わってもしばらく待つ。
+COOLDOWN_SECONDS="${MEASURE_COOLDOWN_SECONDS:-300}"
+SERVER_HOME="/home/isucon"
+PAUSE_POLL="${MEASURE_PAUSE_POLL:-15}"
+PAUSE_TIMEOUT="${MEASURE_PAUSE_TIMEOUT:-900}"
+# この割合より伸びたら改善と判定する。
+IMPROVE_PCT="${MEASURE_IMPROVE_PCT:-3}"
 LEDGER_TITLE="スコア台帳"
 LEDGER_MARK="<!-- measure:"
 # サーバーのログは走行後75秒で消えるので、続けて走らせるときはログが混ざらないように待つ。
@@ -53,6 +71,39 @@ acquire_lock() {
   LOCK_HELD=1
   trap release_lock EXIT
   trap 'exit 130' INT TERM
+  # pause はロックが空くのを待つので、取得の後に確かめれば行き違いがない。
+  local reason
+  reason="$(read_pause)"
+  if [ -n "$reason" ]; then
+    release_lock
+    die 3 "一時停止中です: $reason"
+  fi
+}
+
+# 止める理由があれば出す。flow.sh を通さないデプロイは、未コミットの変更と直近のビルドで検知する。
+read_pause() {
+  ssh "${SSH_OPTS[@]}" "$ASIA1" "
+    cat '$PAUSE_FILE' 2>/dev/null
+    if [ -f '$HOLD_FILE' ]; then
+      read -r until reason < '$HOLD_FILE'
+      [ \"\$(date +%s)\" -lt \"\$until\" ] && echo \"\$reason\"
+    fi
+    if [ -n \"\$(git -C '$SERVER_HOME/isucon2026' status --porcelain --untracked-files=no -- webapp provisioning 2>/dev/null)\" ] \
+      && [ -n \"\$(find '$SERVER_HOME/webapp/go/isureal' -mmin -$((COOLDOWN_SECONDS / 60)) 2>/dev/null)\" ]; then
+      echo '手元の変更が直近にデプロイされています'
+    fi
+  " 2>/dev/null | head -n 1 || true
+}
+
+# 一時停止していなければすぐ戻る。待ったときだけ 0 を返す。
+wait_unpaused() {
+  local reason waited=1
+  while reason="$(read_pause)"; [ -n "$reason" ]; do
+    [ "$waited" -eq 1 ] && echo "==> 一時停止中です: $reason。再開を待ちます"
+    waited=0
+    sleep "$PAUSE_POLL"
+  done
+  return "$waited"
 }
 
 prepare_clone() {
@@ -122,7 +173,7 @@ run_once() {
   tree="$(git -C "$CLONE_DIR" rev-parse 'HEAD^{tree}')"
   base_tree="$(git -C "$CLONE_DIR" rev-parse 'origin/main^{tree}')"
 
-  bash "$CLONE_DIR/provisioning/bench-bot/flow.sh" ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
+  MEASURE_RUN=1 bash "$CLONE_DIR/provisioning/bench-bot/flow.sh" ${args[@]+"${args[@]}"} 2>&1 | tee "$log"
   flow_code="${PIPESTATUS[0]}"
 
   result="$(grep -m1 -E '^Job #[0-9]+ status=' "$log")"
@@ -157,12 +208,23 @@ run_once() {
 
 # run_once を繰り返す。2回目以降はデプロイしない。
 run_series() {
-  local kind="$1" pr="$2" runs="$3" ledger="$4" i
+  local kind="$1" pr="$2" runs="$3" ledger="$4" i skip_deploy
   ANY_FAILED=0
   for ((i = 1; i <= runs; i++)); do
-    [ "$i" -gt 1 ] && sleep "$RUN_INTERVAL"
+    skip_deploy=0
+    if [ "$i" -gt 1 ]; then
+      sleep "$RUN_INTERVAL"
+      skip_deploy=1
+      # 止めている間に他の人がデプロイするので、再開後はデプロイし直す。
+      if [ -n "$(read_pause)" ]; then
+        release_lock
+        wait_unpaused
+        acquire_lock "$kind $pr"
+        skip_deploy=0
+      fi
+    fi
     echo "==> 計測 $i/$runs"
-    run_once "$kind" "$pr" "$([ "$i" -gt 1 ] && echo 1 || echo 0)" "$ledger"
+    run_once "$kind" "$pr" "$skip_deploy" "$ledger"
     [ "$RUN_PASSED" = "true" ] || ANY_FAILED=1
   done
 }
@@ -242,6 +304,118 @@ cmd_pr() {
   [ "$ANY_FAILED" -eq 0 ] || exit 1
 }
 
+# 改善なら PR の本文に、改善しなければコメントに結果を書く。採否は人が決める。
+cmd_report() {
+  local number="${1:-}" entries last tree base_tree passed job score base_median base_range median range verdict delta text body new_body
+  [[ "$number" =~ ^[0-9]+$ ]] || die 2 "PR の番号を指定してください"
+  [ -d "$CLONE_DIR/.git" ] || prepare_clone
+  entries="$(read_entries)" || die 2 "台帳を読めません"
+  last="$(jq -c --arg pr "$number" 'select(.pr == $pr)' <<< "$entries" | tail -n 1)"
+  [ -n "$last" ] || die 3 "PR #$number の計測がありません"
+  tree="$(jq -r .tree <<< "$last")"
+  base_tree="$(jq -r .base_tree <<< "$last")"
+  passed="$(jq -r .passed <<< "$last")"
+  job="$(jq -r .job <<< "$last")"
+  score="$(jq -r .score <<< "$last")"
+  base_median="$(median_score "$entries" "$base_tree")"
+  [ -n "$base_median" ] || die 3 "基準 (tree ${base_tree:0:10}) のスコアがありません"
+  base_range="$(score_range "$entries" "$base_tree")"
+  median="$(median_score "$entries" "$tree")"
+  range="$(score_range "$entries" "$tree")"
+
+  if [ "$passed" != "true" ] || [ -z "$median" ]; then
+    verdict="FAIL"
+  else
+    verdict="$(awk -v a="$median" -v b="$base_median" -v p="$IMPROVE_PCT" 'BEGIN { print (b > 0 && (a - b) * 100 / b >= p) ? "改善" : "改善せず" }')"
+    delta="$(awk -v a="$median" -v b="$base_median" 'BEGIN { printf "%+d", a - b; if (b != 0) printf " (%+.1f%%)", (a - b) * 100 / b }')"
+  fi
+  text="$(cat <<EOF
+## 計測結果: $verdict
+
+| | 中央値 | 範囲 |
+|---|---|---|
+| main (tree \`${base_tree:0:10}\`) | $base_median | $base_range |
+| PR (tree \`${tree:0:10}\`) | ${median:-なし} | ${range:-なし} |
+
+- 差分: ${delta:-なし}
+- 最新の走行: Job #$job score=$score passed=$passed
+- 判定の基準: FAIL がなく、中央値が main より ${IMPROVE_PCT}% 以上伸びたら改善。採否は人が決めます
+EOF
+)"
+  body="$(cd "$CLONE_DIR" && gh pr view "$number" --json body --jq .body)" || die 2 "PR #$number の本文を取得できません"
+  # 前回の結果は消して、最新の判定だけを本文に残す。
+  new_body="$(sed '/^<!-- measure-result -->$/,/^<!-- \/measure-result -->$/d' <<< "$body")"
+  if [ "$verdict" = "改善" ]; then
+    new_body="$(printf '%s\n\n<!-- measure-result -->\n%s\n<!-- /measure-result -->' "$new_body" "$text")"
+  else
+    printf '%s\n' "$text" | (cd "$CLONE_DIR" && gh pr comment "$number" --body-file - >/dev/null) \
+      || die 2 "PR #$number にコメントできません"
+  fi
+  if [ "$new_body" != "$body" ]; then
+    printf '%s\n' "$new_body" | (cd "$CLONE_DIR" && gh api -X PATCH "repos/{owner}/{repo}/pulls/$number" -F body=@- >/dev/null) \
+      || die 2 "PR #$number の本文を更新できません"
+  fi
+  echo "PR #$number: $verdict ${delta:-} (Job #$job)"
+}
+
+cmd_queue() {
+  local numbers=() options=() number code index
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --runs) options+=(--runs "${2:-}"); shift 2 ;;
+      *) [[ "$1" =~ ^[0-9]+$ ]] || die 2 "不明な引数: $1"; numbers+=("$1"); shift ;;
+    esac
+  done
+  [ "${#numbers[@]}" -gt 0 ] || die 2 "PR の番号を指定してください"
+  index=0
+  while [ "$index" -lt "${#numbers[@]}" ]; do
+    number="${numbers[$index]}"
+    wait_unpaused
+    echo "==> PR #$number を計測します"
+    (cmd_pr "$number" ${options[@]+"${options[@]}"})
+    code=$?
+    # 開始の直前に止められたら、同じ PR を再開後に計測する。
+    if [ "$code" -eq 3 ] && [ -n "$(read_pause)" ]; then
+      continue
+    fi
+    if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
+      die "$code" "PR #$number で止まりました。未計測: ${numbers[*]:$index}"
+    fi
+    cmd_report "$number" || exit $?
+    index=$((index + 1))
+  done
+  echo "すべて計測しました: ${numbers[*]}"
+}
+
+cmd_pause() {
+  local reason="${1:-理由なし}" waited=0
+  reason="${reason//\'/}"
+  ssh "${SSH_OPTS[@]}" "$ASIA1" "printf '%s\n' '$(id -un) $(date '+%H:%M:%S') $reason' > '$PAUSE_FILE'" || die 2 "一時停止を設定できません"
+  while ssh "${SSH_OPTS[@]}" "$ASIA1" "test -d '$LOCK_DIR'"; do
+    [ "$waited" -eq 0 ] && echo "今の走行が終わるのを待っています"
+    [ "$waited" -lt "$PAUSE_TIMEOUT" ] || die 2 "ロックが残っています。計測中か measure.sh show で確かめてください"
+    sleep "$PAUSE_POLL"
+    waited=$((waited + PAUSE_POLL))
+  done
+  echo "計測を止めました。終わったら measure.sh resume を実行してください"
+}
+
+write_hold() {
+  local seconds="$1" reason="${2//\'/}"
+  ssh "${SSH_OPTS[@]}" "$ASIA1" "printf '%s %s\\n' \"\$((\$(date +%s) + $seconds))\" '$reason' > '$HOLD_FILE'"
+}
+
+cmd_hold() {
+  local reason="${1:-$(id -un) の flow.sh}" waited=0
+  write_hold "$HOLD_SECONDS" "$reason" || die 2 "待機を設定できません"
+  while ssh "${SSH_OPTS[@]}" "$ASIA1" "test -d '$LOCK_DIR'"; do
+    [ "$waited" -eq 0 ] && echo "PR の計測が終わるのを待っています (1走行あたり数分)"
+    [ "$waited" -lt "$PAUSE_TIMEOUT" ] || die 2 "計測のロックが残っています"
+    sleep "$PAUSE_POLL"
+    waited=$((waited + PAUSE_POLL))
+  done
+}
+
 cmd_adopt() {
   local number="${1:-}" head state tree entries median main_tree
   [[ "$number" =~ ^[0-9]+$ ]] || die 2 "PR の番号を指定してください"
@@ -276,9 +450,15 @@ COMMAND="${1:-}"
 case "$COMMAND" in
   baseline) cmd_baseline "$@" ;;
   pr) cmd_pr "$@" ;;
+  queue) cmd_queue "$@" ;;
+  report) cmd_report "$@" ;;
+  pause) cmd_pause "$@" ;;
+  resume) ssh "${SSH_OPTS[@]}" "$ASIA1" "rm -f '$PAUSE_FILE' '$HOLD_FILE'" && echo "計測を再開しました" ;;
+  hold) cmd_hold "$@" ;;
+  release-hold) write_hold "$COOLDOWN_SECONDS" "$(id -un) の flow.sh の直後" ;;
   adopt) cmd_adopt "$@" ;;
   show) cmd_show ;;
   indexes) list_indexes ;;
   unlock) ssh "${SSH_OPTS[@]}" "$ASIA1" "rm -rf '$LOCK_DIR'" ;;
-  *) sed -n '5,12p' "$0" >&2; exit 2 ;;
+  *) sed -n '5,18p' "$0" >&2; exit 2 ;;
 esac
