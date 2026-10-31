@@ -150,6 +150,7 @@ func createPostHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		h.ImageCache.Put(imageID, imageData)
 		return c.JSON(http.StatusCreated, newPostResponse(post, user))
 	}
 }

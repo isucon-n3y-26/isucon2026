@@ -15,6 +15,7 @@ type HandlerContext struct {
 	DB              *sqlx.DB
 	Config          *Config
 	IPBans          *IPBanList
+	ImageCache      *ImageCache
 	notificationHub *notificationHub
 }
 
@@ -53,6 +54,7 @@ func NewServer(config *Config) *echo.Echo {
 		DB:              db,
 		Config:          config,
 		IPBans:          &IPBanList{},
+		ImageCache:      &ImageCache{Dir: config.ImageCacheDir},
 		notificationHub: newNotificationHub(config.Region),
 	}
 	startPostingWindowListener(config.DatabaseDSN(), handlerContext.notificationHub)

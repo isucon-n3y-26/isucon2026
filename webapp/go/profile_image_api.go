@@ -59,6 +59,10 @@ func putProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		h.ImageCache.Put(imageID, data)
+		if oldID != nil {
+			h.ImageCache.Remove(*oldID)
+		}
 		return c.NoContent(http.StatusNoContent)
 	}
 }
@@ -92,6 +96,7 @@ func deleteProfileImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		h.ImageCache.Remove(*imageID)
 		return c.NoContent(http.StatusNoContent)
 	}
 }

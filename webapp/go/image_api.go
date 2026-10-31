@@ -63,12 +63,9 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 
 		// 削除状態を毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
-		var object struct {
-			Data      []byte `db:"data"`
-			MediaType string `db:"media_type"`
-		}
-		err = h.DB.GetContext(ctx, &object, `
-   SELECT i.data, i.media_type
+		var mediaType string
+		err = h.DB.GetContext(ctx, &mediaType, `
+   SELECT i.media_type
    FROM image_objects i JOIN users u ON u.id = i.owner_user_id AND u.status = 'active'
    WHERE i.id = $1 AND (
      u.profile_image_id = i.id
@@ -93,6 +90,28 @@ func getImageHandler(h *HandlerContext) echo.HandlerFunc {
 		if exp <= time.Now().Unix() {
 			return NewAPIError(http.StatusForbidden, "image_forbidden")
 		}
-		return c.Blob(http.StatusOK, object.MediaType, object.Data)
+
+		// 検証済みの画像だけ nginx に配信させる。ファイルがなければ DB から復元する。
+		accelPath, ok := h.ImageCache.AccelPath(input.ImageID)
+		if !ok {
+			var data []byte
+			err = h.DB.GetContext(ctx, &data, `SELECT data FROM image_objects WHERE id = $1`, input.ImageID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return NewAPIError(http.StatusForbidden, "image_forbidden")
+			}
+			if err != nil {
+				return err
+			}
+			if !h.ImageCache.Put(input.ImageID, data) {
+				return c.Blob(http.StatusOK, mediaType, data)
+			}
+			accelPath, ok = h.ImageCache.AccelPath(input.ImageID)
+			if !ok {
+				return c.Blob(http.StatusOK, mediaType, data)
+			}
+		}
+		c.Response().Header().Set("Content-Type", mediaType)
+		c.Response().Header().Set("X-Accel-Redirect", accelPath)
+		return c.NoContent(http.StatusOK)
 	}
 }
