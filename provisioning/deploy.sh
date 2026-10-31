@@ -12,12 +12,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 REMOTE_REPO_DIR="/home/isucon/isucon2026"
 REMOTE_WEBAPP_DIR="/home/isucon/webapp"
+ACCESS_LOG="/var/log/nginx/access.json.log"
 
-declare -A HOST_MAP=(
-  ["asia1"]="isucon@57.181.195.208"
-  ["europe1"]="isucon@35.74.6.16"
-  ["america1"]="isucon@35.74.122.15"
-)
+get_host() {
+  case "$1" in
+    asia1) echo "isucon@57.181.195.208" ;;
+    europe1) echo "isucon@35.74.6.16" ;;
+    america1) echo "isucon@35.74.122.15" ;;
+    *) return 1 ;;
+  esac
+}
 
 SSH_OPTS="-o StrictHostKeyChecking=no"
 
@@ -29,8 +33,7 @@ else
 fi
 
 for NAME in "${TARGET_NAMES[@]}"; do
-  HOST="${HOST_MAP[$NAME]:-}"
-  if [ -z "$HOST" ]; then
+  if ! HOST="$(get_host "$NAME")"; then
     echo "ERROR: Unknown server name '$NAME'. Valid: asia1, europe1, america1" >&2
     exit 1
   fi
@@ -56,8 +59,27 @@ for NAME in "${TARGET_NAMES[@]}"; do
     "$SCRIPT_DIR/../" \
     "$HOST:$REMOTE_REPO_DIR/"
 
+  # nginx のアクセスログ設定を /etc/nginx/conf.d に配置
+  echo "--> rsync nginx config ..."
+  rsync -az \
+    --no-owner \
+    --no-group \
+    --rsync-path="sudo -n rsync" \
+    -e "ssh $SSH_OPTS" \
+    "$SCRIPT_DIR/../conf/nginx/alp-log.conf" \
+    "$HOST:/etc/nginx/conf.d/alp-log.conf"
+
   ssh $SSH_OPTS "$HOST" "
     set -eu
+
+    # nginx 設定を検証して反映
+    echo '--> Testing and reloading nginx ...'
+    sudo chmod 0644 /etc/nginx/conf.d/alp-log.conf
+    sudo nginx -t
+    sudo systemctl reload nginx.service
+
+    # アクセスログをリセットし、ログ収集用の所有者・グループに設定
+    sudo truncate -s 0 '$ACCESS_LOG' && sudo chown syslog:adm '$ACCESS_LOG'
 
     # 2. webapp/ を rsync で反映
     echo '--> rsync webapp/ ...'
@@ -93,9 +115,9 @@ echo "========================================="
 echo "==> Post-deploy health check ..."
 echo "========================================="
 
-FAILED_HOSTS=()
+FAILED_HOSTS=""
 for NAME in "${TARGET_NAMES[@]}"; do
-  HOST="${HOST_MAP[$NAME]}"
+  HOST="$(get_host "$NAME")"
   echo ""
   echo "--> Checking $NAME ($HOST) ..."
 
@@ -104,7 +126,7 @@ for NAME in "${TARGET_NAMES[@]}"; do
   if [ "$SVC_STATUS" != "active" ]; then
     echo "    [FAIL] isureal-go.service is '$SVC_STATUS'"
     echo "           Fix: ssh $HOST 'journalctl -u isureal-go.service -n 50 --no-pager'"
-    FAILED_HOSTS+=("$NAME")
+    FAILED_HOSTS="${FAILED_HOSTS:+$FAILED_HOSTS }$NAME"
     continue
   fi
   echo "    [OK]   isureal-go.service is active"
@@ -114,7 +136,7 @@ for NAME in "${TARGET_NAMES[@]}"; do
   if [ "$NGX_STATUS" != "active" ]; then
     echo "    [FAIL] nginx.service is '$NGX_STATUS'"
     echo "           Fix: ssh $HOST 'journalctl -u nginx.service -n 20 --no-pager'"
-    FAILED_HOSTS+=("$NAME")
+    FAILED_HOSTS="${FAILED_HOSTS:+$FAILED_HOSTS }$NAME"
     continue
   fi
   echo "    [OK]   nginx.service is active"
@@ -129,7 +151,7 @@ for NAME in "${TARGET_NAMES[@]}"; do
       ;;
     000)
       echo "    [FAIL] HTTP timeout or connection refused"
-      FAILED_HOSTS+=("$NAME")
+      FAILED_HOSTS="${FAILED_HOSTS:+$FAILED_HOSTS }$NAME"
       continue
       ;;
     *)
@@ -140,12 +162,12 @@ done
 
 echo ""
 echo "========================================="
-if [ ${#FAILED_HOSTS[@]} -gt 0 ]; then
-  echo "[FAIL] Health check failed on: ${FAILED_HOSTS[*]}"
+if [ -n "$FAILED_HOSTS" ]; then
+  echo "[FAIL] Health check failed on: $FAILED_HOSTS"
   echo ""
   echo "Troubleshooting:"
-  for NAME in "${FAILED_HOSTS[@]}"; do
-    H="${HOST_MAP[$NAME]}"
+  for NAME in $FAILED_HOSTS; do
+    H="$(get_host "$NAME")"
     echo "  ssh $H 'journalctl -u isureal-go.service -n 50 --no-pager'"
   done
   echo "========================================="
