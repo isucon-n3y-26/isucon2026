@@ -131,6 +131,7 @@ CREATE TABLE follows (
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   UNIQUE(follower_id,followee_id)
 );
+CREATE INDEX follows_followee_id ON follows(followee_id);
 
 CREATE TABLE block_relations (
   id varchar(36) PRIMARY KEY,
