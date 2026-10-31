@@ -173,6 +173,7 @@ CREATE TABLE posts (
 CREATE INDEX posts_author_id ON posts(author_id);
 CREATE INDEX posts_posting_window_id ON posts(posting_window_id);
 CREATE INDEX posts_image_id ON posts(image_id);
+CREATE INDEX posts_author_id_posting_window_id ON posts(author_id, posting_window_id);
 
 CREATE TABLE friend_requests (
   id varchar(36) PRIMARY KEY,

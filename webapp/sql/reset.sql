@@ -51,6 +51,7 @@ INSERT INTO block_relations (id, blocker_id, blocked_id, created_at)
 SELECT id, blocker_id, blocked_id, created_at FROM initial_block_relations;
 -- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
 CREATE INDEX IF NOT EXISTS posts_image_id ON posts(image_id);
+CREATE INDEX IF NOT EXISTS posts_author_id_posting_window_id ON posts(author_id, posting_window_id);
 CREATE INDEX IF NOT EXISTS realmojis_image_id ON realmojis(image_id);
 
 COMMIT;
