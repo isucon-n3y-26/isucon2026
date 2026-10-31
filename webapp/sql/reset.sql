@@ -33,6 +33,9 @@ WHERE u.id = i.id
 
 INSERT INTO friend_requests (id, requester_id, recipient_id, status, created_at, updated_at)
 SELECT id, requester_id, recipient_id, status, created_at, updated_at FROM initial_friend_requests;
+-- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
+CREATE INDEX IF NOT EXISTS friend_requests_pending_requester_recipient ON friend_requests(requester_id, recipient_id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS friend_requests_pending_recipient ON friend_requests(recipient_id) WHERE status = 'pending';
 INSERT INTO friendships (id, user_low_id, user_high_id, source_request_id, created_at, updated_at)
 SELECT id, user_low_id, user_high_id, source_request_id, created_at, updated_at FROM initial_friendships;
 -- 001-schema.sql は構築済みの DB には流れないので、初期化のときに作る。
