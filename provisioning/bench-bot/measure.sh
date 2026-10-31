@@ -189,7 +189,12 @@ run_once() {
   if [ "${code%% *}" = "" ] || [ "${commit#"${code%% *}"}" = "$commit" ] || [[ "$code" == *未コミット* ]]; then
     die 2 "Job #$job はこの計測のコードで走っていません (サーバー: ${code:-不明} / 計測: ${commit:0:7})。記録していません"
   fi
-  [[ "$score" =~ ^-?[0-9]+$ ]] || die 2 "Job #$job のスコアを読めません: $result"
+  # 初期化や整合性チェックで失敗すると、passed=true のまま score=None になる。
+  if ! [[ "$score" =~ ^-?[0-9]+$ ]]; then
+    echo "WARN: Job #$job にスコアがないので FAIL として記録します: $result" >&2
+    score=0
+    passed=false
+  fi
 
   fingerprint="$(index_fingerprint)" || die 2 "DB の索引を確認できません。記録していません"
   [ "$passed" = "true" ] && passed=true || passed=false
