@@ -25,6 +25,27 @@ func getFriendRequest(ctx context.Context, db sqlx.QueryerContext, id string) (F
 	return request, err
 }
 
+// lockRelationshipUsers は actor を排他、target を共有でロックし、見つかった行の id を返す。
+// 同じ相手への別々の利用者の操作は並行できる。同じ2人の組の操作や、相手側のブロック、
+// 退会、投稿の削除とは排他になる。デッドロックを避けるため、ロックは id の順に取る。
+func lockRelationshipUsers(ctx context.Context, tx *sqlx.Tx, actor, target, condition string) ([]string, error) {
+	var lockedIDs []string
+	if actor == target {
+		err := tx.SelectContext(ctx, &lockedIDs, `SELECT id FROM users WHERE id=$1`+condition+` FOR NO KEY UPDATE`, actor)
+		return lockedIDs, err
+	}
+	firstMode, secondMode := "NO KEY UPDATE", "SHARE"
+	if target < actor {
+		firstMode, secondMode = secondMode, firstMode
+	}
+	err := tx.SelectContext(ctx, &lockedIDs, `
+		WITH first AS MATERIALIZED (SELECT id FROM users WHERE id=$1`+condition+` FOR `+firstMode+`),
+		     second AS MATERIALIZED (SELECT id FROM users WHERE id=$2`+condition+` FOR `+secondMode+`)
+		SELECT id FROM first UNION ALL SELECT id FROM second
+	`, min(actor, target), max(actor, target))
+	return lockedIDs, err
+}
+
 func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string) (*sqlx.Tx, error) {
 	if actor == target || target == "" {
 		return nil, NewAPIError(http.StatusBadRequest, "invalid_relationship")
@@ -33,8 +54,8 @@ func beginRelationshipTx(ctx context.Context, db *sqlx.DB, actor, target string)
 	if err != nil {
 		return nil, err
 	}
-	var lockedIDs []string
-	if err := tx.SelectContext(ctx, &lockedIDs, `SELECT id FROM users WHERE id IN ($1, $2) AND status='active' ORDER BY id FOR NO KEY UPDATE`, min(actor, target), max(actor, target)); err != nil {
+	lockedIDs, err := lockRelationshipUsers(ctx, tx, actor, target, ` AND status='active'`)
+	if err != nil {
 		tx.Rollback()
 		return nil, err
 	}

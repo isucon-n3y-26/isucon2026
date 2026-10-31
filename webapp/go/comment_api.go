@@ -50,8 +50,7 @@ func createCommentHandler(h *HandlerContext) echo.HandlerFunc {
 			return err
 		}
 		defer tx.Rollback()
-		var lockedIDs []string
-		if err := tx.SelectContext(ctx, &lockedIDs, `SELECT id FROM users WHERE id IN ($1, $2) ORDER BY id FOR NO KEY UPDATE`, min(actor, post.AuthorID), max(actor, post.AuthorID)); err != nil {
+		if _, err := lockRelationshipUsers(ctx, tx, actor, post.AuthorID, ""); err != nil {
 			return err
 		}
 		allowed, err := canComment(ctx, tx, actor, post.ID)

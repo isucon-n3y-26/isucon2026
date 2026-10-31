@@ -127,7 +127,11 @@ func transitionFriendRequestHandler(h *HandlerContext) echo.HandlerFunc {
 		if (status == "cancelled" && actor != request.RequesterID) || (status != "cancelled" && actor != request.RecipientID) {
 			return NewAPIError(http.StatusForbidden, "relationship_action_forbidden")
 		}
-		tx, err := beginRelationshipTx(ctx, h.DB, request.RequesterID, request.RecipientID)
+		other := request.RecipientID
+		if actor == request.RecipientID {
+			other = request.RequesterID
+		}
+		tx, err := beginRelationshipTx(ctx, h.DB, actor, other)
 		if err != nil {
 			return err
 		}
