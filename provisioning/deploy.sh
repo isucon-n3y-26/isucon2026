@@ -15,7 +15,7 @@ REMOTE_REPO_DIR="/home/isucon/isucon2026"
 REMOTE_WEBAPP_DIR="/home/isucon/webapp"
 ACCESS_LOG="/var/log/nginx/access.json.log"
 DB_HOST="isucon@54.65.131.246"
-DB_CONFIG_SOURCE="$SCRIPT_DIR/postgresql/99-query-observability.conf"
+DB_CONFIG_FILES=("50-performance.conf" "99-query-observability.conf")
 
 get_host() {
   case "$1" in
@@ -34,10 +34,12 @@ deploy_db_config() {
   echo "==> Deploying PostgreSQL config to asia2 ($DB_HOST) ..."
   echo "========================================="
 
-  if [ ! -f "$DB_CONFIG_SOURCE" ]; then
-    echo "ERROR: PostgreSQL config not found: $DB_CONFIG_SOURCE" >&2
-    exit 1
-  fi
+  for DB_CONFIG_FILE in "${DB_CONFIG_FILES[@]}"; do
+    if [ ! -f "$SCRIPT_DIR/postgresql/$DB_CONFIG_FILE" ]; then
+      echo "ERROR: PostgreSQL config not found: $SCRIPT_DIR/postgresql/$DB_CONFIG_FILE" >&2
+      exit 1
+    fi
+  done
 
   DB_PG_CONFIG_FILE=$(ssh $SSH_OPTS "$DB_HOST" \
     "sudo -u postgres psql -XAt -d postgres -c 'SHOW config_file'")
@@ -55,12 +57,16 @@ EOF
   ssh $SSH_OPTS "$DB_HOST" \
     "sudo install -d -o root -g postgres -m 0755 '$DB_CONFIG_DIR'"
 
-  DB_CONFIG_CHANGES=$(rsync -azi --no-owner --no-group \
-    --out-format='%i %n' \
-    --rsync-path="sudo -n rsync" \
-    -e "ssh $SSH_OPTS" \
-    "$DB_CONFIG_SOURCE" \
-    "$DB_HOST:$DB_CONFIG_DIR/99-query-observability.conf")
+  DB_CONFIG_CHANGES=""
+  for DB_CONFIG_FILE in "${DB_CONFIG_FILES[@]}"; do
+    DB_CONFIG_CHANGE=$(rsync -azi --no-owner --no-group \
+      --out-format='%i %n' \
+      --rsync-path="sudo -n rsync" \
+      -e "ssh $SSH_OPTS" \
+      "$SCRIPT_DIR/postgresql/$DB_CONFIG_FILE" \
+      "$DB_HOST:$DB_CONFIG_DIR/$DB_CONFIG_FILE")
+    DB_CONFIG_CHANGES="$DB_CONFIG_CHANGES$DB_CONFIG_CHANGE"
+  done
 
   if [ -n "$DB_CONFIG_CHANGES" ]; then
     echo "$DB_CONFIG_CHANGES"
@@ -69,6 +75,16 @@ EOF
       "sudo pg_ctlcluster '$DB_PG_VERSION' '$DB_CLUSTER' reload"
   else
     echo "--> PostgreSQL config unchanged."
+  fi
+
+  # reload だけでは反映されない設定が残っていれば再起動する。設定を変えていなくても、
+  # 前回のデプロイが再起動の前に失敗していた場合にここで回復する。
+  DB_PENDING_RESTART=$(ssh $SSH_OPTS "$DB_HOST" \
+    "sudo -u postgres psql -XAt -d postgres -c 'SELECT count(*) FROM pg_settings WHERE pending_restart'")
+  if [ "$DB_PENDING_RESTART" != "0" ]; then
+    echo "--> Restarting PostgreSQL to apply $DB_PENDING_RESTART setting(s) ..."
+    ssh $SSH_OPTS "$DB_HOST" \
+      "sudo pg_ctlcluster '$DB_PG_VERSION' '$DB_CLUSTER' restart"
   fi
 }
 
