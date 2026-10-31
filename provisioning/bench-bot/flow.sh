@@ -46,6 +46,21 @@ bot.send_discord(content, (\"flow-report.md\", report))
   '
 }
 
+# measure.sh の外から走らせるときは、PR の計測を待たせる。失敗しても手元のベンチは止めない。
+HOLDING=0
+if [ -z "${MEASURE_RUN:-}" ]; then
+  if bash "$SCRIPT_DIR/measure.sh" hold; then
+    HOLDING=1
+  else
+    echo "WARN: PR の計測を止められませんでした。そのまま続けます" >&2
+  fi
+fi
+cleanup() {
+  [ -n "${WORK_DIR:-}" ] && rm -rf "$WORK_DIR"
+  [ "$HOLDING" -eq 1 ] && bash "$SCRIPT_DIR/measure.sh" release-hold
+}
+trap cleanup EXIT
+
 # worktree の .git はファイルなので、deploy.sh の rsync がサーバーの .git で失敗して途中で止まる。
 check_deployable() {
   local root
@@ -71,7 +86,6 @@ fi
 
 mkdir -p "$REPORT_DIR" || exit 2
 WORK_DIR="$(mktemp -d)" || exit 2
-trap 'rm -rf "$WORK_DIR"' EXIT
 STAMP="$(date +%Y%m%d-%H%M%S)"
 # --skip-deploy では手元のコードとサーバーのコードが一致しない。
 if [ "$SKIP_DEPLOY" -eq 0 ]; then
