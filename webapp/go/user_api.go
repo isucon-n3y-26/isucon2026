@@ -98,6 +98,7 @@ func registerHandler(h *HandlerContext) echo.HandlerFunc {
 		if err := user.setImageKey(); err != nil {
 			return err
 		}
+		globalUserSearchCache.UpsertUser(user)
 		return c.JSON(http.StatusCreated, registerResponse{SecretKey: secretKey, User: newSessionUserResponse(user)})
 	}
 }
@@ -114,7 +115,7 @@ func loginHandler(h *HandlerContext) echo.HandlerFunc {
 		}
 		ctx := c.Request().Context()
 		// 資格情報の検証はロックなし・トランザクション外で行う。
-		// ユーザー行のロックと status の再確認は createLoginSessionTx が1回だけ行う。
+		// ユーザー行のロックと status の再確認は createLoginSession が1回だけ行う。
 		var user User
 		err := h.DB.GetContext(ctx, &user, `SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status FROM users WHERE username = $1`, input.Username)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -127,20 +128,12 @@ func loginHandler(h *HandlerContext) echo.HandlerFunc {
 		if user.Status != "active" || user.SecretKeyHash != hex.EncodeToString(hash[:]) {
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
-		tx, err := h.DB.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		session, err := createLoginSessionTx(ctx, tx, user.ID)
+		session, err := createLoginSession(ctx, h.DB, user.ID)
 		if errors.Is(err, errLoginUserNotActive) {
 			// 検証後にアカウントが削除された場合
 			return NewAPIError(http.StatusUnauthorized, "invalid_credentials")
 		}
 		if err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
 			return err
 		}
 		return c.JSON(http.StatusOK, loginResponse{Token: session.Token, User: newSessionUserResponse(user)})
@@ -166,14 +159,7 @@ func getMeHandler(h *HandlerContext) echo.HandlerFunc {
 		if session == nil {
 			return NewAPIError(http.StatusUnauthorized, "invalid_session")
 		}
-		user, err := getUser(c.Request().Context(), h.DB, session.UserID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return NewAPIError(http.StatusNotFound, "account_not_found")
-		}
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, newGetMeResponse(user))
+		return c.JSON(http.StatusOK, newGetMeResponse(session.User))
 	}
 }
 
@@ -194,39 +180,33 @@ func updateMeHandler(h *HandlerContext) echo.HandlerFunc {
 			return NewAPIError(http.StatusBadRequest, "invalid_profile")
 		}
 		ctx := c.Request().Context()
-		tx, err := h.DB.BeginTxx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if input.DisplayName != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE users SET display_name = $2, updated_at = clock_timestamp() WHERE id = $1`, session.UserID, *input.DisplayName); err != nil {
-				return err
-			}
-		}
-		if input.Bio != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE users SET bio = $2, updated_at = clock_timestamp() WHERE id = $1`, session.UserID, *input.Bio); err != nil {
-				return err
-			}
-		}
-		if input.Region != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE users SET region = $2, updated_at = clock_timestamp() WHERE id = $1`, session.UserID, *input.Region); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `SELECT pg_notify($1, $2)`, notificationRecipientChangedChannel, session.UserID); err != nil {
-				return err
-			}
-		}
-		user, err := getUser(ctx, tx, session.UserID)
+		var user User
+		err := h.DB.GetContext(ctx, &user, `
+			WITH updated AS (
+				UPDATE users
+				SET display_name = COALESCE($2, display_name),
+				    bio = COALESCE($3, bio),
+				    region = COALESCE($4, region),
+				    updated_at = clock_timestamp()
+				WHERE id = $1 AND status = 'active'
+				RETURNING `+strings.Join(userColumns, ", ")+`
+			), notified AS (
+				SELECT CASE WHEN $4::text IS NOT NULL THEN pg_notify($5, id) END
+				FROM updated
+			)
+			SELECT u.id, u.username, u.secret_key_hash, u.display_name, u.bio, u.profile_image_id, u.region, u.account_type, u.status
+			FROM updated u LEFT JOIN notified n ON true
+		`, session.UserID, input.DisplayName, input.Bio, input.Region, notificationRecipientChangedChannel)
 		if errors.Is(err, sql.ErrNoRows) {
 			return NewAPIError(http.StatusNotFound, "account_not_found")
 		}
 		if err != nil {
 			return err
 		}
-		if err := tx.Commit(); err != nil {
+		if err := user.setImageKey(); err != nil {
 			return err
 		}
+		globalUserSearchCache.UpsertUser(user)
 		return c.JSON(http.StatusOK, updateMeResponse(newGetMeResponse(user)))
 	}
 }

@@ -15,13 +15,19 @@ type initializeResponse struct {
 	Model    string `json:"model"`
 }
 
-func initializeHandler(*HandlerContext) echo.HandlerFunc {
+func initializeHandler(h *HandlerContext) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		cmd := exec.Command("../sql/init.sh")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			return err
+		}
+		if h != nil {
+			if h.IPBans != nil {
+				h.IPBans.Reset()
+			}
+			_ = globalUserSearchCache.ReloadAll(c.Request().Context(), h.DB)
 		}
 
 		// Set language to the implementation language.
