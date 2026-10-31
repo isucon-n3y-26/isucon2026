@@ -12,10 +12,11 @@ import (
 )
 
 type HandlerContext struct {
-	DB         *sqlx.DB
-	Config     *Config
-	IPBans     *IPBanList
-	ImageCache *ImageCache
+	DB              *sqlx.DB
+	Config          *Config
+	IPBans          *IPBanList
+	ImageCache      *ImageCache
+	notificationHub *notificationHub
 }
 
 func NewServer(config *Config) *echo.Echo {
@@ -50,11 +51,13 @@ func NewServer(config *Config) *echo.Echo {
 	}
 
 	handlerContext := &HandlerContext{
-		DB:         db,
-		Config:     config,
-		IPBans:     &IPBanList{},
-		ImageCache: &ImageCache{Dir: config.ImageCacheDir},
+		DB:              db,
+		Config:          config,
+		IPBans:          &IPBanList{},
+		ImageCache:      &ImageCache{Dir: config.ImageCacheDir},
+		notificationHub: newNotificationHub(config.Region),
 	}
+	startPostingWindowListener(config.DatabaseDSN(), handlerContext.notificationHub)
 	e.Use(IPBanMiddleware(handlerContext))
 
 	e.POST("/api/initialize", initializeHandler(handlerContext))
